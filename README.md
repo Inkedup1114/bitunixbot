@@ -1,4 +1,4 @@
-# Bitunix OVIR‑X Trading Bot
+# Bitunix O| **Language**      | Go 1.24 (single static binary < 10 MB)                               |IR‑X Trading Bot
 
 *A lightweight, production‑ready crypto futures bot written in Go. Trades BTCUSDT / ETHUSDT (or any Bitunix perp symbol) using an adaptive micro‑structure mean‑reversion strategy.*
 
@@ -83,9 +83,15 @@ go run ./cmd/bitrader
 ### Docker
 
 ```bash
-docker build -t bitunix-bot .
+docker build -t bitunix-bot ./deploy
 docker run --env-file .env -v ~/bitunix-data:/srv/data -d --restart unless-stopped bitunix-bot
 ```
+
+**Security features:**
+- Runs as non-root user (65532:65532)
+- Includes CA certificates for secure outbound connections
+- Uses minimal Alpine base image
+- Binary is stripped of debug info with `-buildvcs=false`
 
 ### systemd
 
