@@ -1,0 +1,15 @@
+[Unit]
+Description=Bitunix OVIR-X Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=%i
+EnvironmentFile=/etc/bitrader.env
+WorkingDirectory=/home/%i/projects/bitunix-bot
+ExecStart=/usr/local/bin/bitrader
+Restart=always
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,48 @@
+// filepath: /home/inkie/projects/bitunix-bot/internal/cfg/config.yaml
+# Example configuration file for bitunix-bot
+# This file can be used instead of or in addition to environment variables
+
+# API Configuration
+api:
+  key: "your_api_key_here"
+  secret: "your_secret_key_here"
+  baseURL: "https://api.bitunix.com"
+  wsURL: "wss://fapi.bitunix.com/public"
+
+# Trading Configuration
+trading:
+  symbols:
+    - "BTCUSDT"
+    - "ETHUSDT"
+  baseSizeRatio: 0.002
+  maxPositionSize: 0.01  # 1% max position per symbol
+  maxDailyLoss: 0.05     # 5% max daily loss
+  maxPriceDistance: 3.0  # 3 standard deviations max
+  dryRun: true
+
+# Symbol-specific configuration
+symbolConfig:
+  BTCUSDT:
+    baseSizeRatio: 0.001
+    maxPositionSize: 0.015
+  ETHUSDT:
+    baseSizeRatio: 0.002
+    maxPositionSize: 0.01
+
+# Technical Analysis Configuration
+features:
+  vwapWindow: "30s"
+  vwapSize: 600
+  tickSize: 50
+
+# ML Configuration
+ml:
+  modelPath: "model.onnx"
+  probThreshold: 0.65
+
+# System Configuration  
+system:
+  dataPath: "/tmp/bitunix-data"
+  pingInterval: "15s"
+  metricsPort: 8080
+  restTimeout: "5s"

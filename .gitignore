@@ -1,0 +1,3 @@
+.env
+bitunix-data.db
+*.log
