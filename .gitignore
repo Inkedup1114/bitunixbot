@@ -1,3 +1,5 @@
 .env
 bitunix-data.db
 *.log
+bitrader
+/bitrader
