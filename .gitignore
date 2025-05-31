@@ -3,3 +3,39 @@ bitunix-data.db
 *.log
 bitrader
 /bitrader
+# Ignore Python virtual environments and large binaries
+venv/
+*.so
+*.dll
+*.dylib
+*.pyd
+# Ignore all files in site-packages (for local venvs)
+**/site-packages/
+# Ignore ONNX and model binaries if not needed
+*.onnx
+# Ignore Jupyter notebook checkpoints
+.ipynb_checkpoints/
+# Ignore Python cache and build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+build/
+dist/
+.eggs/
+*.egg-info/
+# Ignore test and coverage outputs
+coverage.out
+*.cover
+*.py,cover
+# Ignore data and model artifacts
+models/
+model-*.onnx
+model-*_metrics.json
+# Ignore editor and OS files
+.DS_Store
+*.swp
+*.swo
+# Ignore Go build cache
+*.test
+# End of file
