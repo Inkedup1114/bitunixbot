@@ -46,6 +46,44 @@ func (w *MetricsWrapper) UpdatePositions(positions map[string]float64) {
 	w.m.UpdatePositions(positions)
 }
 
+// ML metrics methods
+func (w *MetricsWrapper) MLPredictionsInc() {
+	w.m.MLPredictions.Inc()
+}
+
+func (w *MetricsWrapper) MLFailuresInc() {
+	w.m.MLFailures.Inc()
+}
+
+func (w *MetricsWrapper) MLLatencyObserve(v float64) {
+	w.m.MLLatency.Observe(v)
+}
+
+func (w *MetricsWrapper) MLModelAgeSet(v float64) {
+	w.m.MLModelAge.Set(v)
+}
+
+func (w *MetricsWrapper) FeatureErrorsInc() {
+	w.m.FeatureErrors.Inc()
+}
+
+// Enhanced ML metrics methods
+func (w *MetricsWrapper) MLAccuracyObserve(v float64) {
+	w.m.MLAccuracy.Observe(v)
+}
+
+func (w *MetricsWrapper) MLPredictionScoresObserve(v float64) {
+	w.m.MLPredictionScores.Observe(v)
+}
+
+func (w *MetricsWrapper) MLTimeoutsInc() {
+	w.m.MLTimeouts.Inc()
+}
+
+func (w *MetricsWrapper) MLFallbackUseInc() {
+	w.m.MLFallbackUse.Inc()
+}
+
 type CounterWrapper struct {
 	c prometheus.Counter
 }

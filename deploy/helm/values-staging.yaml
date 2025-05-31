@@ -1,0 +1,176 @@
+# Staging environment values
+replicaCount: 2
+
+image:
+  repository: your-registry.com/bitunix-bot
+  pullPolicy: Always
+  tag: "staging"
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations:
+  staging-environment: "true"
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8080"
+  prometheus.io/path: "/metrics"
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: true
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    cert-manager.io/cluster-issuer: "letsencrypt-staging"
+  hosts:
+    - host: bitunix-bot-staging.example.com
+      paths:
+        - path: /metrics
+          pathType: Prefix
+  tls:
+    - secretName: bitunix-bot-staging-tls
+      hosts:
+        - bitunix-bot-staging.example.com
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 200m
+    memory: 256Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 100
+      podAffinityTerm:
+        labelSelector:
+          matchExpressions:
+          - key: app.kubernetes.io/name
+            operator: In
+            values:
+            - bitunix-bot
+        topologyKey: kubernetes.io/hostname
+
+# Bot-specific configuration
+bot:
+  dryRun: false  # Live trading with small amounts
+  logLevel: info
+  config:
+    api:
+      baseURL: "https://staging-api.bitunix.com"
+      wsURL: "wss://staging-fapi.bitunix.com/public"
+      timeout: "5s"
+      retryAttempts: 3
+    trading:
+      symbols: ["BTCUSDT", "ETHUSDT"]
+      baseSizeRatio: 0.002
+      maxDailyLoss: 0.02
+      maxPositionSize: 0.01
+      maxPriceDistance: 2.5
+    ml:
+      modelPath: "model.onnx"
+      probThreshold: 0.65
+      timeout: "15s"
+    features:
+      vwapWindow: "30s"
+      vwapSize: 600
+      tickSize: 50
+    system:
+      pingInterval: "15s"
+      metricsPort: 8080
+      restTimeout: "5s"
+
+# Staging-specific settings
+monitoring:
+  enabled: true
+  prometheusAnnotations: true
+
+persistence:
+  enabled: true
+  storageClass: "standard"
+  size: 10Gi
+
+# Health checks
+healthCheck:
+  enabled: true
+  livenessProbe:
+    httpGet:
+      path: /metrics
+      port: 8080
+    initialDelaySeconds: 60
+    periodSeconds: 30
+  readinessProbe:
+    httpGet:
+      path: /metrics
+      port: 8080
+    initialDelaySeconds: 30
+    periodSeconds: 10
+
+# Pod Disruption Budget
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Network Policy
+networkPolicy:
+  enabled: true
+  ingress:
+    - from:
+      - namespaceSelector:
+          matchLabels:
+            name: monitoring
+      ports:
+      - protocol: TCP
+        port: 8080
+  egress:
+    - to: []
+      ports:
+      - protocol: TCP
+        port: 443  # HTTPS
+      - protocol: TCP
+        port: 53   # DNS
+      - protocol: UDP
+        port: 53   # DNS
+
+# Resource quotas
+resourceQuota:
+  enabled: true
+  hard:
+    requests.cpu: "1"
+    requests.memory: "1Gi"
+    limits.cpu: "2"
+    limits.memory: "2Gi"

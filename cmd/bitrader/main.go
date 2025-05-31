@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -93,12 +94,41 @@ func main() {
 		lastPriceMap.Store(s, 0.0)
 	}
 
-	// Predictor & executor
-	pred, err := ml.New(c.ModelPath)
+	// Initialize production ML predictor
+	mlConfig := ml.PredictorConfig{
+		ModelPath:         c.ModelPath,
+		FallbackThreshold: c.ProbThreshold,
+		MaxRetries:        3,
+		RetryDelay:        time.Second,
+		CacheSize:         1000,
+		CacheTTL:          5 * time.Minute,
+		EnableProfiling:   os.Getenv("ML_PROFILING") == "true",
+		EnableValidation:  true,
+		MinConfidence:     0.5,
+	}
+
+	pred, err := ml.NewProductionPredictor(mlConfig, mw)
 	if err != nil {
 		log.Warn().Err(err).Msg("ML model unavailable, using fallback")
+		// Create basic predictor as fallback
+		pred, _ = ml.NewWithMetrics(c.ModelPath, mw, 5*time.Second)
 	}
-	exe := exec.New(c, pred, mw)
+
+	// Start ML model server if enabled
+	if mlPort := os.Getenv("ML_SERVER_PORT"); mlPort != "" {
+		port, _ := strconv.Atoi(mlPort)
+		if port > 0 {
+			mlServer := ml.NewModelServer(pred, port)
+			go func() {
+				if err := mlServer.Start(); err != nil && err != http.ErrServerClosed {
+					log.Error().Err(err).Msg("ML server failed")
+				}
+			}()
+			defer mlServer.Shutdown(context.Background())
+		}
+	}
+
+	exe := exec.New(c, pred, mw, store)
 
 	// Error handler goroutine
 	wg.Add(1)
@@ -138,7 +168,7 @@ func main() {
 					continue // Skip if no price data yet
 				}
 
-				vwap, std := vwapMap[d.Symbol].Calc()
+				vwap, std := vwapMap[d.Symbol].CalcWithMetrics(mw)
 				if std == 0 {
 					continue
 				}
@@ -147,8 +177,8 @@ func main() {
 				m.VWAPCalculations.Inc()
 
 				tickRatio := ticksMap[d.Symbol].Ratio()
-				depthRatio := features.DepthImb(d.BidVol, d.AskVol)
-				exe.Try(d.Symbol, price, vwap, std, tickRatio, depthRatio)
+				depthRatio := features.DepthImbWithMetrics(d.BidVol, d.AskVol, mw)
+				exe.Try(d.Symbol, price, vwap, std, tickRatio, depthRatio, d.BidVol, d.AskVol)
 
 				// Store depth data if storage is available
 				if store != nil {

@@ -121,7 +121,7 @@ func loadFromYAML(path string) (Settings, error) {
 		return Settings{}, fmt.Errorf("API key and secret are required")
 	}
 
-	return Settings{
+	settings := Settings{
 		Key:              key,
 		Secret:           secret,
 		Symbols:          getSymbolsFromEnvOrConfig(config.Trading.Symbols),
@@ -142,7 +142,14 @@ func loadFromYAML(path string) (Settings, error) {
 		MaxPriceDistance: getFloatFromEnvOrConfig("MAX_PRICE_DISTANCE", config.Trading.MaxPriceDistance),
 		SymbolConfigs:    config.SymbolConfig,
 		RESTTimeout:      restTimeout,
-	}, nil
+	}
+
+	// Validate configuration
+	if err := validateSettings(&settings); err != nil {
+		return Settings{}, fmt.Errorf("configuration validation failed: %w", err)
+	}
+
+	return settings, nil
 }
 
 func loadFromEnv() (Settings, error) {
@@ -156,7 +163,7 @@ func loadFromEnv() (Settings, error) {
 		return Settings{}, err
 	}
 
-	return Settings{
+	settings := Settings{
 		Key:              key,
 		Secret:           secret,
 		Symbols:          splitOrDefault(os.Getenv("SYMBOLS"), []string{"BTCUSDT"}),
@@ -177,7 +184,14 @@ func loadFromEnv() (Settings, error) {
 		MaxPriceDistance: getFloatOrDefault("MAX_PRICE_DISTANCE", 3.0), // 3 std devs
 		SymbolConfigs:    make(map[string]SymbolConfig),
 		RESTTimeout:      getDurationOrDefault("REST_TIMEOUT", 5*time.Second),
-	}, nil
+	}
+
+	// Validate configuration
+	if err := validateSettings(&settings); err != nil {
+		return Settings{}, fmt.Errorf("configuration validation failed: %w", err)
+	}
+
+	return settings, nil
 }
 
 // GetSymbolConfig returns configuration for a specific symbol, with fallback to global config
@@ -293,4 +307,79 @@ func getBoolFromEnvOrConfig(key string, configValue bool) bool {
 		}
 	}
 	return configValue
+}
+
+// validateSettings performs comprehensive validation of configuration values
+func validateSettings(settings *Settings) error {
+	// Validate API credentials
+	if settings.Key == "" || settings.Secret == "" {
+		return fmt.Errorf("API key and secret are required")
+	}
+
+	// Validate symbols
+	if len(settings.Symbols) == 0 {
+		return fmt.Errorf("at least one trading symbol must be specified")
+	}
+
+	// Validate URLs
+	if settings.BaseURL == "" {
+		return fmt.Errorf("base URL cannot be empty")
+	}
+	if settings.WsURL == "" {
+		return fmt.Errorf("WebSocket URL cannot be empty")
+	}
+
+	// Validate time durations
+	if settings.Ping < time.Second || settings.Ping > 5*time.Minute {
+		return fmt.Errorf("ping interval must be between 1s and 5m, got %v", settings.Ping)
+	}
+	if settings.VWAPWindow < time.Second || settings.VWAPWindow > time.Hour {
+		return fmt.Errorf("VWAP window must be between 1s and 1h, got %v", settings.VWAPWindow)
+	}
+	if settings.RESTTimeout < time.Second || settings.RESTTimeout > time.Minute {
+		return fmt.Errorf("REST timeout must be between 1s and 1m, got %v", settings.RESTTimeout)
+	}
+
+	// Validate integer values
+	if settings.VWAPSize <= 0 || settings.VWAPSize > 10000 {
+		return fmt.Errorf("VWAP size must be between 1 and 10000, got %d", settings.VWAPSize)
+	}
+	if settings.TickSize <= 0 || settings.TickSize > 1000 {
+		return fmt.Errorf("tick size must be between 1 and 1000, got %d", settings.TickSize)
+	}
+	if settings.MetricsPort < 1024 || settings.MetricsPort > 65535 {
+		return fmt.Errorf("metrics port must be between 1024 and 65535, got %d", settings.MetricsPort)
+	}
+
+	// Validate float values - trading parameters
+	if settings.BaseSizeRatio <= 0 || settings.BaseSizeRatio > 0.1 {
+		return fmt.Errorf("base size ratio must be between 0 and 0.1 (10%%), got %f", settings.BaseSizeRatio)
+	}
+	if settings.ProbThreshold < 0.5 || settings.ProbThreshold > 0.99 {
+		return fmt.Errorf("probability threshold must be between 0.5 and 0.99, got %f", settings.ProbThreshold)
+	}
+	if settings.MaxDailyLoss <= 0 || settings.MaxDailyLoss > 0.5 {
+		return fmt.Errorf("max daily loss must be between 0 and 0.5 (50%%), got %f", settings.MaxDailyLoss)
+	}
+	if settings.MaxPositionSize <= 0 || settings.MaxPositionSize > 0.2 {
+		return fmt.Errorf("max position size must be between 0 and 0.2 (20%%), got %f", settings.MaxPositionSize)
+	}
+	if settings.MaxPriceDistance <= 0 || settings.MaxPriceDistance > 10.0 {
+		return fmt.Errorf("max price distance must be between 0 and 10 standard deviations, got %f", settings.MaxPriceDistance)
+	}
+
+	// Validate symbol-specific configs
+	for symbol, config := range settings.SymbolConfigs {
+		if config.BaseSizeRatio <= 0 || config.BaseSizeRatio > 0.1 {
+			return fmt.Errorf("symbol %s: base size ratio must be between 0 and 0.1, got %f", symbol, config.BaseSizeRatio)
+		}
+		if config.MaxPositionSize <= 0 || config.MaxPositionSize > 0.2 {
+			return fmt.Errorf("symbol %s: max position size must be between 0 and 0.2, got %f", symbol, config.MaxPositionSize)
+		}
+		if config.MaxPriceDistance <= 0 || config.MaxPriceDistance > 10.0 {
+			return fmt.Errorf("symbol %s: max price distance must be between 0 and 10, got %f", symbol, config.MaxPriceDistance)
+		}
+	}
+
+	return nil
 }

@@ -1,0 +1,96 @@
+# Development environment values
+replicaCount: 1
+
+image:
+  repository: localhost:5000/bitunix-bot
+  pullPolicy: Always
+  tag: "latest"
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations:
+  dev-environment: "true"
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: true
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: false
+
+resources:
+  limits:
+    cpu: 200m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+autoscaling:
+  enabled: false
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# Bot-specific configuration
+bot:
+  dryRun: true  # Always dry run in development
+  logLevel: debug
+  config:
+    api:
+      baseURL: "https://testnet-api.bitunix.com"
+      wsURL: "wss://testnet-fapi.bitunix.com/public"
+      timeout: "10s"
+      retryAttempts: 3
+    trading:
+      symbols: ["BTCUSDT"]  # Single symbol for testing
+      baseSizeRatio: 0.001
+      maxDailyLoss: 0.01
+      maxPositionSize: 0.005
+      maxPriceDistance: 2.0
+    ml:
+      modelPath: "model.onnx"
+      probThreshold: 0.6  # Lower threshold for more signals
+      timeout: "30s"     # Longer timeout for debugging
+    features:
+      vwapWindow: "30s"
+      vwapSize: 300
+      tickSize: 25
+    system:
+      pingInterval: "30s"
+      metricsPort: 8080
+      restTimeout: "10s"
+
+# Development-specific settings
+monitoring:
+  enabled: true
+  prometheusAnnotations: true
+
+persistence:
+  enabled: false
+
+# Resource quotas (optional in development)
+resourceQuota:
+  enabled: false
