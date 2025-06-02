@@ -28,30 +28,7 @@ The bot implements multiple layers of security:
 # Security configuration in config.yaml
 security:
   # API rate limiting
-  rateLimit:
     enabled: true
-    requestsPerMinute: 60
-    burstSize: 10
-  
-  # TLS configuration
-  tls:
-    minVersion: "1.3"
-    cipherSuites:
-      - "TLS_AES_256_GCM_SHA384"
-      - "TLS_CHACHA20_POLY1305_SHA256"
-      - "TLS_AES_128_GCM_SHA256"
-  
-  # Input validation
-  validation:
-    maxRequestSize: "1MB"
-    sanitizeInputs: true
-    enforceSchemas: true
-  
-  # Audit logging
-  audit:
-    enabled: true
-    logLevel: "info"
-    includeRequestBodies: false
     retentionDays: 90
 ```
 
@@ -61,20 +38,25 @@ security:
 
 1. **Key Management**:
    ```bash
-   # Generate secure API keys
-   openssl rand -hex 32 > api_key.txt
-   openssl rand -hex 32 > secret_key.txt
+   # NEVER hardcode credentials in code or config files
+   # Use environment variables
+   export BITUNIX_API_KEY="$(cat /run/secrets/api_key)"
+   export BITUNIX_SECRET_KEY="$(cat /run/secrets/secret_key)"
    
-   # Set proper permissions
-   chmod 600 api_key.txt secret_key.txt
-   chown root:root api_key.txt secret_key.txt
+   # Or use secure files with proper permissions
+   chmod 600 secrets/api_key.txt secrets/secret_key.txt
    ```
 
 2. **Environment Variables**:
    ```bash
    # Use secure environment variable patterns
-   export BITUNIX_API_KEY_FILE="/run/secrets/api_key"
-   export BITUNIX_SECRET_KEY_FILE="/run/secrets/secret_key"
+   # Option 1: From files (recommended for production)
+   export BITUNIX_API_KEY="$(cat /run/secrets/api_key)"
+   export BITUNIX_SECRET_KEY="$(cat /run/secrets/secret_key)"
+   
+   # Option 2: Direct environment variables (development only)
+   export BITUNIX_API_KEY="your_development_key"
+   export BITUNIX_SECRET_KEY="your_development_secret"
    ```
 
 3. **Secrets Rotation**:

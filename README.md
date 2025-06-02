@@ -9,14 +9,14 @@
 | Capability        | Details                                                              |
 | ----------------- | -------------------------------------------------------------------- |
 | **Exchange**      | Bitunix Perpetual Futures (`/api/v1/futures`)                        |
-| **Language**      | Go 1.22 (single static binary < 10 MB)                               |
-| **Data Feeds**    | Public WebSocket – tick trades & depth, optional ONNX model gate     |
+| **Language**      | Go 1.22 (single static binary < 10 MB)                               |
+| **Data Feeds**    | Public WebSocket – tick trades & depth, optional ONNX model gate     |
 | **Strategy**      | **OVIR‑X** → Open‑interest‑proxy, VWAP deviation, Imbalance Reversal |
-| **Execution**     | REST `place_order` (MARKET) with volatility‑weighted sizing          |
+| **Execution**     | REST `place_order` (MARKET) with volatility‑weighted sizing          |
 | **Persistence**   | BoltDB state file, crash‑safe auto‑resume                            |
 | **Observability** | Zerolog structured logs, optional Prometheus metrics `/metrics`      |
 | **Deployment**    | Run via `go run`, Docker, or systemd unit                            |
-| **Security**      | LUKS‑encrypted OS, API keys in `.env`, UFW + Fail2ban by default     |
+| **Security**      | Environment-based secrets, encrypted storage, secure deployment      |
 
 ---
 
@@ -121,7 +121,5 @@ sudo systemctl daemon-reload && sudo systemctl enable --now bitunix-bot@<youruse
 * **Hard stop‑loss** inside executor (customizable)
 * **Daily loss cap** easy to add by reading BoltDB PnL stats
 * Logs stored outside repo in `DATA_PATH` (avoids filling `/`)
-
----
 
 

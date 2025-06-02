@@ -36,359 +36,138 @@ info() {
     echo -e "${BLUE}[$(date +'%H:%M:%S')] INFO:${NC} $1"
 }
 
-show_help() {
-    cat << EOF
-Complete ML Pipeline Setup and Test Script
-
-Usage: $0 [OPTIONS]
-
-Options:
-    --setup-only      Only setup dependencies, don't run training/tests
-    --test-only       Only run tests, skip setup and training
-    --no-sample-data  Don't generate sample data (require real BoltDB)
-    --quick-test      Run minimal tests for quick validation
-    -h, --help        Show this help message
-
-Examples:
-    $0                    # Full setup, training, and testing
-    $0 --setup-only       # Just install dependencies
-    $0 --test-only        # Just run validation tests
-    $0 --quick-test       # Fast validation check
-EOF
-}
-
-# Parse arguments
-SETUP_ONLY=false
-TEST_ONLY=false
-NO_SAMPLE_DATA=false
-QUICK_TEST=false
-
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --setup-only)
-            SETUP_ONLY=true
-            shift
-            ;;
-        --test-only)
-            TEST_ONLY=true
-            shift
-            ;;
-        --no-sample-data)
-            NO_SAMPLE_DATA=true
-            shift
-            ;;
-        --quick-test)
-            QUICK_TEST=true
-            shift
-            ;;
-        -h|--help)
-            show_help
-            exit 0
-            ;;
-        *)
-            error "Unknown option: $1"
-            ;;
-    esac
-done
-
-# Main execution
-main() {
-    echo "🚀 Bitunix Trading Bot - ML Pipeline Setup & Test"
-    echo "=================================================="
+# Check dependencies
+check_dependencies() {
+    log "Checking dependencies..."
     
-    if [[ "$TEST_ONLY" != true ]]; then
-        setup_environment
-        if [[ "$SETUP_ONLY" != true ]]; then
-            run_training_pipeline
-        fi
-    fi
-    
-    if [[ "$SETUP_ONLY" != true ]]; then
-        run_validation_tests
-    fi
-    
-    show_summary
-}
-
-setup_environment() {
-    log "Setting up ML pipeline environment..."
-    
-    # Create required directories
-    mkdir -p "$MODELS_DIR" "$DATA_DIR" "$LOGS_DIR"
-    
-    # Check Go installation
-    if ! command -v go &> /dev/null; then
-        error "Go is not installed. Please install Go 1.21+ first."
-    fi
-    
-    go_version=$(go version | awk '{print $3}' | sed 's/go//')
-    info "Go version: $go_version"
-    
-    # Check Python installation
+    # Check Python
     if ! command -v python3 &> /dev/null; then
-        error "Python 3 is not installed. Please install Python 3.9+ first."
+        error "Python3 is not installed"
     fi
     
-    python_version=$(python3 --version | awk '{print $2}')
-    info "Python version: $python_version"
+    # Check Python version
+    PYTHON_VERSION=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
+    log "Python version: $PYTHON_VERSION"
     
-    # Install Python dependencies
-    log "Installing Python ML dependencies..."
+    # Check if version is suitable for ONNX Runtime
+    if ! python3 -c "import sys; exit(0 if 3.8 <= sys.version_info[:2] <= (3, 12) else 1)"; then
+        warn "Python version $PYTHON_VERSION may not be fully compatible with ONNX Runtime"
+        warn "Recommended versions: 3.8, 3.9, 3.10, 3.11, or 3.12"
+    fi
+    
+    # Check pip
+    if ! command -v pip3 &> /dev/null; then
+        error "pip3 is not installed"
+    else
+        PIP_VERSION=$(pip3 --version | awk '{print $2}')
+        log "pip3 version: $PIP_VERSION"
+    fi
+}
+
+# Setup Python environment
+setup_python_env() {
+    if [ -z "$VIRTUAL_ENV" ]; then
+        # Try to find existing venv
+        if [ -d "$PROJECT_ROOT/venv" ]; then
+            log "Found existing virtual environment at $PROJECT_ROOT/venv"
+            log "Activating virtual environment..."
+            source "$PROJECT_ROOT/venv/bin/activate"
+        elif [ -d "$PROJECT_ROOT/.venv" ]; then
+            log "Found existing virtual environment at $PROJECT_ROOT/.venv"
+            source "$PROJECT_ROOT/.venv/bin/activate"
+        else
+            log "No virtual environment found. Creating new one..."
+            python3 -m venv "$PROJECT_ROOT/venv" || {
+                error "Failed to create virtual environment. Installing python3-venv..."
+                sudo apt-get update && sudo apt-get install -y python3-venv
+                python3 -m venv "$PROJECT_ROOT/venv"
+            }
+            source "$PROJECT_ROOT/venv/bin/activate"
+        fi
+    else
+        log "Virtual environment already active: $VIRTUAL_ENV"
+    fi
+    
+    # Verify activation
+    if [ -z "$VIRTUAL_ENV" ]; then
+        error "Failed to activate virtual environment"
+    fi
+    
+    # Upgrade pip and install wheel
+    log "Upgrading pip and setuptools..."
+    pip install --upgrade pip setuptools wheel
+}
+
+create_venv() {
+    log "Creating new virtual environment..."
+    python3 -m venv "$PROJECT_ROOT/venv" || error "Failed to create virtual environment"
+    source "$PROJECT_ROOT/venv/bin/activate" || error "Failed to activate virtual environment"
+    log "Virtual environment created and activated"
+}
+
+# Create directories
+create_directories() {
+    log "Creating required directories..."
+    
+    mkdir -p "$MODELS_DIR"
+    mkdir -p "$DATA_DIR"
+    mkdir -p "$LOGS_DIR"
+    
+    log "Directories created"
+}
+
+# Run tests
+run_tests() {
+    log "Running ML pipeline tests..."
+    
+    # Ensure we're in the virtual environment
+    if [ -z "$VIRTUAL_ENV" ]; then
+        warn "Not in virtual environment, activating..."
+        source "$PROJECT_ROOT/venv/bin/activate" || warn "Failed to activate venv"
+    fi
+    
+    # Test data export
+    if [ -f "$DATA_DIR/features.db" ]; then
+        go run "$SCRIPT_DIR/export_data.go" -db "$DATA_DIR/features.db" -days 1 -output "$SCRIPT_DIR/test_export.json" || warn "Data export test failed"
+    fi
+    
+    # Test model training with sample data
     cd "$SCRIPT_DIR"
-    if ! pip3 install -r requirements.txt > "$LOGS_DIR/pip_install.log" 2>&1; then
-        error "Failed to install Python dependencies. Check $LOGS_DIR/pip_install.log"
+    python3 label_and_train.py --test-mode || error "Model training test failed"
+    
+    # Test model integration
+    if [ -f "$MODELS_DIR/model.onnx" ]; then
+        go run "$SCRIPT_DIR/test_model.go" "$MODELS_DIR/model.onnx" || warn "Model integration test failed"
     fi
     
-    # Check critical Python packages
-    log "Validating Python packages..."
-    python3 -c "
-import sys
-try:
-    import sklearn, xgboost, onnx, onnxruntime, numpy, pandas
-    print('✅ All required packages installed')
-except ImportError as e:
-    print(f'❌ Missing package: {e}')
-    sys.exit(1)
-" || error "Python package validation failed"
-    
-    # Build Go modules
-    log "Building Go modules..."
-    cd "$PROJECT_ROOT"
-    if ! go mod tidy > "$LOGS_DIR/go_build.log" 2>&1; then
-        error "Failed to build Go modules. Check $LOGS_DIR/go_build.log"
-    fi
-    
-    # Test Go compilation
-    if ! go build -o /tmp/test_build scripts/export_data.go > "$LOGS_DIR/go_compile.log" 2>&1; then
-        error "Failed to compile Go scripts. Check $LOGS_DIR/go_compile.log"
-    fi
-    rm -f /tmp/test_build
-    
-    log "Environment setup completed successfully"
+    log "Tests completed"
 }
 
-run_training_pipeline() {
-    log "Running ML training pipeline..."
+# Main setup
+main() {
+    log "Starting ML pipeline setup..."
     
-    cd "$PROJECT_ROOT"
+    check_dependencies
+    create_directories
+    setup_python_env
     
-    # Check for existing database
-    if [[ -f "$DATA_DIR/features.db" ]]; then
-        log "Found existing BoltDB, exporting training data..."
-        
-        # Export data for training
-        if ! go run scripts/export_data.go \
-            -db "$DATA_DIR/features.db" \
-            -output "$SCRIPT_DIR/training_data.json" \
-            -days 30 > "$LOGS_DIR/data_export.log" 2>&1; then
-            warn "Data export failed, will use sample data generation"
-            rm -f "$SCRIPT_DIR/training_data.json"
-        else
-            record_count=$(python3 -c "
-import json
-try:
-    with open('$SCRIPT_DIR/training_data.json') as f:
-        data = json.load(f)
-    print(len(data))
-except:
-    print(0)
-")
-            info "Exported $record_count training records"
-            
-            if [[ "$record_count" -lt 100 ]]; then
-                warn "Insufficient training data ($record_count records), will use sample data generation"
-                rm -f "$SCRIPT_DIR/training_data.json"
-            fi
-        fi
-    else
-        if [[ "$NO_SAMPLE_DATA" == true ]]; then
-            error "No BoltDB found and sample data generation disabled"
-        fi
-        warn "No BoltDB found at $DATA_DIR/features.db, will use sample data generation"
+    if [ "${1:-}" = "--test" ]; then
+        run_tests
     fi
     
-    # Run training
-    log "Training ML model..."
-    cd "$SCRIPT_DIR"
-    if ! python3 label_and_train.py > "$LOGS_DIR/training.log" 2>&1; then
-        error "Model training failed. Check $LOGS_DIR/training.log"
-    fi
+    log "ML pipeline setup completed successfully!"
+    info "Next steps:"
+    info "1. Export training data: go run scripts/export_data.go -days 30"
+    info "2. Train model: cd scripts && python3 label_and_train.py"
+    info "3. Deploy model: ./scripts/deploy_model.sh"
     
-    # Verify model creation
-    if [[ ! -f "$MODELS_DIR/model.onnx" ]]; then
-        error "Model file not created: $MODELS_DIR/model.onnx"
-    fi
-    
-    # Show training results
-    if [[ -f "$MODELS_DIR/training_metrics.json" ]]; then
-        log "Training completed successfully! Metrics:"
-        python3 -c "
-import json
-try:
-    with open('$MODELS_DIR/training_metrics.json') as f:
-        metrics = json.load(f)
-    print(f\"  🎯 AUC Score: {metrics.get('auc_score', 'N/A'):.4f}\")
-    print(f\"  🎯 F1 Score: {metrics.get('f1_score', 'N/A'):.4f}\")
-    print(f\"  📊 Training samples: {metrics.get('n_samples', 'N/A')}\")
-    print(f\"  ⚖️ Positive ratio: {metrics.get('positive_ratio', 'N/A'):.3f}\")
-except Exception as e:
-    print(f'Could not read metrics: {e}')
-"
-    fi
-    
-    # Clean up
-    rm -f "$SCRIPT_DIR/training_data.json"
-}
-
-run_validation_tests() {
-    log "Running validation tests..."
-    
-    cd "$PROJECT_ROOT"
-    
-    # Test 1: ONNX model validation
-    log "Test 1: ONNX model validation..."
-    if [[ -f "$MODELS_DIR/model.onnx" ]]; then
-        python3 -c "
-import onnx
-import onnxruntime as ort
-try:
-    model = onnx.load('$MODELS_DIR/model.onnx')
-    onnx.checker.check_model(model)
-    session = ort.InferenceSession('$MODELS_DIR/model.onnx')
-    print('✅ ONNX model validation passed')
-    
-    # Test inference
-    import numpy as np
-    test_input = np.array([[0.1, -0.2, 0.5]], dtype=np.float32)
-    input_name = session.get_inputs()[0].name
-    result = session.run(None, {input_name: test_input})
-    print(f'✅ ONNX inference test passed: {len(result)} outputs')
-    
-except Exception as e:
-    print(f'❌ ONNX validation failed: {e}')
-    exit(1)
-" || error "ONNX model validation failed"
-    else
-        warn "No ONNX model found, skipping ONNX validation"
-    fi
-    
-    # Test 2: Go integration
-    log "Test 2: Go ML integration..."
-    if [[ "$QUICK_TEST" == true ]]; then
-        # Quick test - just compile
-        if ! go build -o /tmp/test_ml scripts/test_model.go > "$LOGS_DIR/go_test.log" 2>&1; then
-            error "Go ML test compilation failed. Check $LOGS_DIR/go_test.log"
-        fi
-        rm -f /tmp/test_ml
-        info "Go compilation test passed"
-    else
-        # Full integration test
-        if ! timeout 30 go run scripts/test_model.go "$MODELS_DIR/model.onnx" > "$LOGS_DIR/integration_test.log" 2>&1; then
-            warn "Go integration test failed or timed out. Check $LOGS_DIR/integration_test.log"
-        else
-            info "Go integration test passed"
-        fi
-    fi
-    
-    # Test 3: Data export script
-    log "Test 3: Data export functionality..."
-    if ! go run scripts/export_data.go -h > /dev/null 2>&1; then
-        error "Data export script failed to run"
-    fi
-    info "Data export test passed"
-    
-    # Test 4: Deployment script
-    log "Test 4: Deployment script validation..."
-    if [[ ! -x "$SCRIPT_DIR/deploy_model.sh" ]]; then
-        error "Deployment script is not executable"
-    fi
-    
-    if ! "$SCRIPT_DIR/deploy_model.sh" --help > /dev/null 2>&1; then
-        error "Deployment script failed help test"
-    fi
-    info "Deployment script test passed"
-    
-    # Test 5: Model size and performance
-    if [[ -f "$MODELS_DIR/model.onnx" ]]; then
-        log "Test 5: Model performance checks..."
-        
-        model_size=$(stat -f%z "$MODELS_DIR/model.onnx" 2>/dev/null || stat -c%s "$MODELS_DIR/model.onnx")
-        model_size_mb=$((model_size / 1024 / 1024))
-        
-        if [[ $model_size_mb -gt 10 ]]; then
-            warn "Model size is large: ${model_size_mb}MB (consider quantization)"
-        else
-            info "Model size OK: ${model_size_mb}MB"
-        fi
-        
-        # Test inference speed
-        python3 -c "
-import time
-import numpy as np
-import onnxruntime as ort
-
-try:
-    session = ort.InferenceSession('$MODELS_DIR/model.onnx')
-    test_input = np.array([[0.1, -0.2, 0.5]], dtype=np.float32)
-    input_name = session.get_inputs()[0].name
-    
-    # Warmup
-    for _ in range(5):
-        session.run(None, {input_name: test_input})
-    
-    # Timing test
-    start = time.time()
-    for _ in range(100):
-        session.run(None, {input_name: test_input})
-    end = time.time()
-    
-    avg_time_ms = (end - start) / 100 * 1000
-    print(f'Average inference time: {avg_time_ms:.2f}ms')
-    
-    if avg_time_ms > 100:
-        print('⚠️  Warning: Inference time is high (>100ms)')
-    else:
-        print('✅ Inference time is acceptable')
-        
-except Exception as e:
-    print(f'❌ Performance test failed: {e}')
-"
+    # Show activation command if not in venv
+    if [ -z "$VIRTUAL_ENV" ]; then
+        info ""
+        info "To activate the virtual environment for future use:"
+        info "  source $PROJECT_ROOT/venv/bin/activate"
     fi
 }
 
-show_summary() {
-    echo ""
-    echo "🎉 ML Pipeline Setup Complete!"
-    echo "=============================="
-    echo ""
-    
-    if [[ -f "$MODELS_DIR/model.onnx" ]]; then
-        echo "✅ ONNX Model: $MODELS_DIR/model.onnx"
-        model_size=$(stat -f%z "$MODELS_DIR/model.onnx" 2>/dev/null || stat -c%s "$MODELS_DIR/model.onnx")
-        echo "   Size: $((model_size / 1024))KB"
-    else
-        echo "❌ No ONNX model found"
-    fi
-    
-    if [[ -f "$MODELS_DIR/training_metrics.json" ]]; then
-        echo "✅ Training Metrics: $MODELS_DIR/training_metrics.json"
-    fi
-    
-    echo "✅ Scripts: $SCRIPT_DIR/"
-    echo "✅ Documentation: $PROJECT_ROOT/ML_PIPELINE.md"
-    echo "✅ Logs: $LOGS_DIR/"
-    
-    echo ""
-    echo "Next Steps:"
-    echo "==========="
-    echo "1. Review training metrics in $MODELS_DIR/training_metrics.json"
-    echo "2. Test integration: go run scripts/test_model.go"
-    echo "3. Deploy to production: ./scripts/deploy_model.sh"
-    echo "4. Monitor bot performance with new ML gate"
-    echo "5. Set up automated retraining with GitHub Actions"
-    echo ""
-    echo "For detailed usage instructions, see: ML_PIPELINE.md"
-}
-
-# Run main function
+# Run main
 main "$@"

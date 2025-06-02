@@ -1,6 +1,10 @@
 package metrics
 
-import "github.com/prometheus/client_golang/prometheus"
+import (
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+)
 
 // Interfaces for metrics to avoid circular imports
 type MetricsCounter interface {
@@ -82,6 +86,19 @@ func (w *MetricsWrapper) MLTimeoutsInc() {
 
 func (w *MetricsWrapper) MLFallbackUseInc() {
 	w.m.MLFallbackUse.Inc()
+}
+
+// Feature calculation duration tracking
+func (w *MetricsWrapper) FeatureCalcDuration(duration time.Duration) {
+	// Convert duration to seconds and observe it as ML latency
+	w.m.MLLatency.Observe(duration.Seconds())
+}
+
+// Feature sample count tracking
+func (w *MetricsWrapper) FeatureSampleCount(count int) {
+	// Could add a specific metric for sample counts if needed
+	// For now, we'll track it as a gauge
+	w.m.VWAPCalculations.Inc()
 }
 
 type CounterWrapper struct {

@@ -217,6 +217,13 @@ func (pp *ProductionPredictor) ApproveWithContext(ctx context.Context, features 
 	return float64(score) > threshold
 }
 
+// Approve implements PredictorInterface - delegates to embedded Predictor with context
+func (pp *ProductionPredictor) Approve(features []float32, threshold float64) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return pp.ApproveWithContext(ctx, features, threshold)
+}
+
 // validateInput checks if input features are within expected ranges
 func (pp *ProductionPredictor) validateInput(features []float32) error {
 	if len(features) != len(pp.metadata.Features) {
@@ -396,11 +403,20 @@ func (pp *ProductionPredictor) recordError(err error) {
 	pp.perfStats.errors++
 	pp.perfStats.mu.Unlock()
 
-	// Update health status with error
-	if status := pp.GetHealthStatus(); status != nil {
-		status.LastError = err.Error()
-		pp.healthStatus.Store(status)
+	// Update health status with error - use atomic operation
+	status := &HealthStatus{
+		Healthy:         pp.Predictor != nil && pp.Predictor.available,
+		LastCheck:       time.Now(),
+		ModelLoaded:     pp.Predictor != nil && pp.Predictor.available,
+		AverageLatency:  0, // Will be updated by next health check
+		PredictionCount: 0, // Will be updated by next health check
+		ErrorRate:       0, // Will be updated by next health check
+		CacheHitRate:    0, // Will be updated by next health check
+		LastError:       err.Error(),
+		ModelVersion:    pp.metadata.Version,
+		UptimeSeconds:   time.Since(pp.perfStats.startTime).Seconds(),
 	}
+	pp.healthStatus.Store(status)
 }
 
 func (pp *ProductionPredictor) recordCacheHit() {

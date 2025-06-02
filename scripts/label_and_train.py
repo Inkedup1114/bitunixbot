@@ -1,29 +1,37 @@
 #!/usr/bin/env python3
+
+import warnings
+import logging
+import os
+import json
+from typing import Tuple, Optional
+from datetime import datetime, timedelta
+import numpy as np
+import pandas as pd
+
+# Suppress the precision warnings from sklearn
+warnings.filterwarnings('ignore', category=UserWarning, module='sklearn.metrics._classification')
+
 """
 ML Training Pipeline for Bitunix Bot
 Trains a GradientBoostingClassifier on historical features with σ-reversion labels.
 """
-
-import os
-import json
-import argparse
-import logging
-import pandas as pd
-import numpy as np
-from typing import Tuple, Optional
-from datetime import datetime, timedelta
-import warnings
-warnings.filterwarnings('ignore')
 
 # ML libraries
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.model_selection import train_test_split, RandomizedSearchCV
 from sklearn.metrics import classification_report, roc_auc_score, f1_score
 from sklearn.preprocessing import StandardScaler
-import onnx
+from sklearn.pipeline import Pipeline
 import onnxruntime as ort
 from skl2onnx import convert_sklearn
 from skl2onnx.common.data_types import FloatTensorType
+import shutil                      # add once for reuse
+
+# Suppress specific warnings
+warnings.filterwarnings('ignore', category=UserWarning, module='sklearn')
+warnings.filterwarnings('ignore', category=FutureWarning, module='sklearn')
+warnings.filterwarnings('ignore', category=DeprecationWarning, module='sklearn')
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -33,6 +41,26 @@ FEATURE_COLS = ['tick_ratio', 'depth_ratio', 'price_dist']
 LOOKHEAD_SECONDS = 60
 SIGMA_THRESHOLD = 1.5  # σ threshold for reversal detection
 MODEL_VERSION = datetime.now().strftime("%Y%m%d")
+
+# ------------------------------------------------------------------
+# Global logger (accessible from all functions)
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s"
+    )
+# ------------------------------------------------------------------
+
+# Alternative labeling methods
+def volatility_breakout_labeling(df, threshold=2.0):
+    rolling_vol = df['price'].rolling(window=20).std()
+    price_change = df['price'].pct_change(periods=10)
+    return abs(price_change) > threshold * rolling_vol
+
+def momentum_labeling(df, threshold=0.02):
+    returns = df['price'].pct_change(periods=20)
+    return abs(returns) > threshold
 
 def load_bolt_data(data_file: str, symbol: str = "BTCUSDT") -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
@@ -277,13 +305,11 @@ def train_model(df: pd.DataFrame) -> Tuple[GradientBoostingClassifier, StandardS
     
     # Hyperparameter tuning with RandomizedSearchCV for faster search
     param_distributions = {
-        'n_estimators': [50, 100, 200, 300],
-        'learning_rate': [0.01, 0.05, 0.1, 0.15, 0.2],
-        'max_depth': [3, 4, 5, 6, 7, 8],
-        'min_samples_split': [10, 20, 50, 100],
-        'min_samples_leaf': [5, 10, 20, 30],
-        'subsample': [0.8, 0.9, 1.0],
-        'max_features': ['sqrt', 'log2', None]
+        'n_estimators': [100, 200, 300, 500],
+        'max_depth': [3, 5, 7, 9],
+        'learning_rate': [0.01, 0.05, 0.1, 0.2],
+        'subsample': [0.7, 0.8, 0.9, 1.0],
+        'min_samples_split': [2, 5, 10],
     }
     
     # Use class_weight='balanced' to handle class imbalance
@@ -296,16 +322,8 @@ def train_model(df: pd.DataFrame) -> Tuple[GradientBoostingClassifier, StandardS
     
     # Use RandomizedSearchCV for faster hyperparameter search
     random_search = RandomizedSearchCV(
-        gb_classifier, 
-        param_distributions, 
-        n_iter=30,  # Reduced for faster training
-        cv=5,  # Increased for better validation
-        scoring=['roc_auc', 'f1', 'precision', 'recall'], 
-        refit='roc_auc',  # Primary metric for model selection
-        n_jobs=-1, 
-        verbose=1,
-        random_state=42,
-        return_train_score=True
+        gb_classifier, param_distributions, n_iter=50, cv=5,
+        scoring='roc_auc', n_jobs=-1, random_state=42
     )
     
     logging.info("🔍 Running randomized hyperparameter search...")
@@ -353,48 +371,77 @@ def train_model(df: pd.DataFrame) -> Tuple[GradientBoostingClassifier, StandardS
     for feature, importance in metrics['feature_importance'].items():
         logging.info(f"   {feature}: {importance:.4f}")
     
-    return best_model, scaler, metrics
+    return best_model, scaler, metrics, X_test, y_test
 
-def export_onnx(model, scaler, output_path: str, quantize: bool = True):
-    """Export model to ONNX format with optional quantization"""
-    
+def export_onnx(model, scaler, output_path, X_test, quantize=True):
+    """Export model to ONNX format"""
     try:
-        # Create a pipeline that includes scaling
-        from sklearn.pipeline import Pipeline
-        pipeline = Pipeline([
-            ('scaler', scaler),
-            ('classifier', model)
-        ])
-        
-        # Convert to ONNX
-        input_type = [('input', FloatTensorType([None, len(FEATURE_COLS)]))]
-        onnx_model = convert_sklearn(pipeline, initial_types=input_type)
-        
+        print("\n🔄 Converting model to ONNX format...")
+
+        model_dir = os.path.dirname(output_path)
+        if model_dir and not os.path.exists(model_dir):
+            os.makedirs(model_dir)
+
+        pipeline = Pipeline([('scaler', scaler), ('classifier', model)])
+        onnx_path = output_path if output_path.endswith(".onnx") else os.path.join(model_dir, "model.onnx")
+
+        n_features = X_test.shape[1]
+        initial_type = [('float_input', FloatTensorType([None, n_features]))]
+
+        # ----- conversion --------------------------------------------------
+        onnx_model = convert_sklearn(
+            pipeline,
+            initial_types=initial_type,
+            target_opset=11          # int, works with ORT quantiser
+        )
+        with open(onnx_path, "wb") as f:
+            f.write(onnx_model.SerializeToString())
+        print(f"✅ ONNX model saved to: {onnx_path}")
+
+        # ----- validation --------------------------------------------------
+        ort_session = ort.InferenceSession(onnx_path, providers=['CPUExecutionProvider'])
+        test_input = X_test[:1].astype(np.float32)
+        ort_session.run(None, {ort_session.get_inputs()[0].name: test_input})
+        print("✅ ONNX model validated")
+
+        # ----- quantisation -----------------------------------------------
         if quantize:
-            # Quantize to QUInt8 for better performance
-            from onnxruntime.quantization import quantize_dynamic, QuantType
-            
-            temp_path = output_path.replace('.onnx', '_temp.onnx')
-            onnx.save(onnx_model, temp_path)
-            
-            quantize_dynamic(
-                temp_path,
-                output_path,
-                weight_type=QuantType.QUInt8
-            )
-            
-            os.remove(temp_path)
-            logging.info(f"✓ Exported quantized ONNX model to {output_path}")
-        else:
-            onnx.save(onnx_model, output_path)
-            logging.info(f"✓ Exported ONNX model to {output_path}")
-        
-        # Test ONNX model
-        test_onnx_model(output_path)
-        
+            try:
+                from onnxruntime.quantization import quantize_dynamic, QuantType
+                quantized_path = onnx_path.replace(".onnx", "_quantized.onnx")
+                print("📉 Quantising model …")
+
+                # Quantise the preprocessed model
+                quantize_dynamic(
+                    onnx_path,
+                    quantized_path,
+                    weight_type=QuantType.QInt8
+                )
+                print(f"✅ Quantised model generated at: {quantized_path}")
+
+                # quick smoke-test the quantized model BEFORE overwriting the original
+                print("🧪 Validating quantised model...")
+                ort.InferenceSession(quantized_path).run(
+                    None, {ort_session.get_inputs()[0].name: test_input}
+                )
+                print("✅ Quantised model validated")
+
+                # If validation successful, replace original model
+                shutil.move(quantized_path, onnx_path)
+                print(f"✅ Quantised model saved to: {onnx_path}")
+
+            except Exception as e:
+                logger.warning(f"⚠️  Quantisation failed – keeping FP model ({e})")
+                if os.path.exists(quantized_path):
+                    os.remove(quantized_path) # Clean up the failed quantized model
+                    logger.info(f"🗑️ Removed temporary quantized file: {quantized_path}")
+
+        return True
+
     except Exception as e:
-        logging.error(f"❌ ONNX export failed: {e}")
-        raise
+        logger.error(f"❌ ONNX export failed: {e}")
+        import traceback; traceback.print_exc()
+        return False
 
 def test_onnx_model(model_path: str):
     """Test ONNX model inference"""
@@ -441,8 +488,8 @@ def parse_arguments():
                       help='Lookhead window in seconds for labeling')
     parser.add_argument('--sigma-threshold', type=float, default=1.5,
                       help='Sigma threshold for reversal detection')
-    parser.add_argument('--no-quantize', action='store_true',
-                      help='Disable ONNX model quantization')
+    parser.add_argument('--no-quantize', action='store_true', 
+                       help='Skip ONNX quantization')
     parser.add_argument('--min-samples', type=int, default=1000,
                       help='Minimum samples required for training')
     parser.add_argument('--verbose', action='store_true',
@@ -497,29 +544,52 @@ def main():
     
     # Train model
     logging.info("\n🤖 Training model...")
-    model, scaler, metrics = train_model(clean_df)
+    result = train_model(clean_df)
     
-    # Export ONNX
-    model_path = os.path.join(args.output_dir, f"model-{MODEL_VERSION}.onnx")
-    logging.info(f"\n📦 Exporting ONNX model...")
-    export_onnx(model, scaler, model_path, quantize=not args.no_quantize)
+    # Handle the return values based on what train_model actually returns
+    if len(result) == 6:
+        model, scaler, metrics, X_test, y_test, _ = result
+    elif len(result) == 5:
+        model, scaler, metrics, X_test, y_test = result
+    else:
+        # Fallback for the current train_model that returns 3 values
+        model, scaler, metrics = result[:3]
+        # We need to recreate X_test for ONNX export
+        X = clean_df[FEATURE_COLS].values
+        y = clean_df['label'].values
+        X_scaled = scaler.fit_transform(X)
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_scaled, y, test_size=0.2, random_state=42, stratify=y
+        )
+    
+    # Export to ONNX
+    model_path = os.path.join(args.output_dir, f"model.onnx")
+    logging.info("\n📦 Exporting ONNX model...")
+    
+    # Ensure X_test is available for export
+    if 'X_test' not in locals():
+        # Create X_test if not available
+        X = clean_df[FEATURE_COLS].values
+        X_test = scaler.transform(X[:5])  # Just need sample for ONNX conversion
+    
+    export_success = export_onnx(model, scaler, model_path, X_test, quantize=not args.no_quantize)
+    
+    if not export_success:
+        logging.error("❌ ONNX export failed!")
+        return
     
     # Save metrics
     save_metrics(metrics, model_path)
     
-    # Save scaler separately for easier debugging and reproducibility
-    import joblib
-    scaler_path = model_path.replace('.onnx', '_scaler.pkl')
-    joblib.dump(scaler, scaler_path)
-    logging.info(f"✓ Saved scaler to {scaler_path}")
-    
-    # Save feature names for validation
+    # Save feature info for debugging and reproducibility
     feature_info = {
-        'feature_names': FEATURE_COLS,
+        'features': FEATURE_COLS,
+        'symbol': args.symbol,
+        'lookhead_seconds': LOOKHEAD_SECONDS,
+        'sigma_threshold': SIGMA_THRESHOLD,
         'feature_count': len(FEATURE_COLS),
         'scaler_mean': scaler.mean_.tolist() if hasattr(scaler, 'mean_') else None,
         'scaler_scale': scaler.scale_.tolist() if hasattr(scaler, 'scale_') else None,
-        'creation_timestamp': datetime.now().isoformat()
     }
     feature_info_path = model_path.replace('.onnx', '_feature_info.json')
     with open(feature_info_path, 'w') as f:
@@ -529,33 +599,20 @@ def main():
     # Create symlink to latest model
     latest_path = os.path.join(args.output_dir, "model.onnx")
     try:
-        if os.path.exists(latest_path):
-            os.remove(latest_path)
-        os.symlink(os.path.basename(model_path), latest_path)
-        logging.info(f"✓ Created symlink: model.onnx -> {os.path.basename(model_path)}")
+        # Skip when model_path already equals latest_path to prevent a self-loop
+        if os.path.abspath(model_path) != os.path.abspath(latest_path):
+            if os.path.islink(latest_path) or os.path.exists(latest_path):
+                os.remove(latest_path)
+            os.symlink(os.path.basename(model_path), latest_path)
+            logging.info(f"✓ Created symlink: model.onnx -> {os.path.basename(model_path)}")
     except OSError as e:
         logging.warning(f"⚠️  Could not create symlink: {e}")
     
+    # Test the exported model
+    test_onnx_model(model_path)
+    
     logging.info(f"\n🎉 Training complete! Model ready for deployment.")
-    logging.info(f"   Copy {model_path} to your bot directory")
-    logging.info(f"   Or use the symlink: {latest_path}")
-
-# Backward compatibility for old CLI usage
-def legacy_main():
-    """Legacy main function for backward compatibility"""
-    data_file = sys.argv[1] if len(sys.argv) > 1 else "scripts/training_data.json"
-    symbol = sys.argv[2] if len(sys.argv) > 2 else "BTCUSDT"
-    output_dir = sys.argv[3] if len(sys.argv) > 3 else "."
-    
-    # Set sys.argv to match argparse expectations
-    sys.argv = [
-        sys.argv[0],
-        '--data-file', data_file,
-        '--symbol', symbol,
-        '--output-dir', output_dir
-    ]
-    
-    main()
+    logging.info(f"   Model saved to: {model_path}")
 
 if __name__ == "__main__":
     main()

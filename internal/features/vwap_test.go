@@ -452,6 +452,7 @@ func TestVWAP_CalcWithMetrics_NegativeVariance(t *testing.T) {
 
 // Benchmarks for VWAP performance testing
 func BenchmarkVWAP_Add(b *testing.B) {
+	b.ReportAllocs() // Report allocations for allocation-free testing
 	v := NewVWAP(time.Minute, 1000)
 
 	// Pre-generate test data to avoid allocation in hot loop
@@ -469,6 +470,7 @@ func BenchmarkVWAP_Add(b *testing.B) {
 }
 
 func BenchmarkVWAP_AddWithMetrics(b *testing.B) {
+	b.ReportAllocs() // Report allocations for allocation-free testing
 	v := NewVWAP(time.Minute, 1000)
 	metrics := &MockMetricsTracker{}
 
@@ -487,6 +489,7 @@ func BenchmarkVWAP_AddWithMetrics(b *testing.B) {
 }
 
 func BenchmarkVWAP_Calc(b *testing.B) {
+	b.ReportAllocs() // Report allocations for allocation-free testing
 	v := NewVWAP(time.Minute, 100)
 
 	// Pre-populate with some data
@@ -501,6 +504,7 @@ func BenchmarkVWAP_Calc(b *testing.B) {
 }
 
 func BenchmarkVWAP_CalcWithMetrics(b *testing.B) {
+	b.ReportAllocs() // Report allocations for allocation-free testing
 	v := NewVWAP(time.Minute, 100)
 	metrics := &MockMetricsTracker{}
 
@@ -516,6 +520,7 @@ func BenchmarkVWAP_CalcWithMetrics(b *testing.B) {
 }
 
 func BenchmarkVWAP_ConcurrentAddCalc(b *testing.B) {
+	b.ReportAllocs() // Report allocations for allocation-free testing
 	v := NewVWAP(time.Minute, 1000)
 
 	// Pre-populate with some data
@@ -540,6 +545,7 @@ func BenchmarkVWAP_ConcurrentAddCalc(b *testing.B) {
 }
 
 func BenchmarkVWAP_Reset(b *testing.B) {
+	b.ReportAllocs() // Report allocations for allocation-free testing
 	v := NewVWAP(time.Minute, 1000)
 
 	b.ResetTimer()

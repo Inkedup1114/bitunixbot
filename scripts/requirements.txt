@@ -1,21 +1,20 @@
-# ML Pipeline Requirements for Bitunix Trading Bot
-# Core ML libraries
-scikit-learn>=1.3.0
-xgboost>=1.7.0
-numpy>=1.21.0
-pandas>=1.5.0
+# Core ML dependencies
+numpy==1.26.4
+onnxruntime==1.17.3
+scikit-learn==1.6.1
+pandas==2.2.3
+joblib==1.5.1
 
-# ONNX support
-onnx>=1.14.0
-onnxruntime>=1.15.0
-skl2onnx>=1.15.0
+# ONNX model management (optional, only for model conversion)
+# onnx==1.15.0  # Commented out - only needed for model conversion
+
+# Visualization and analysis
+matplotlib==3.10.3
+seaborn==0.13.2
 
 # Data processing
-scipy>=1.9.0
+PyYAML==6.0.2
 
-# Optional: Advanced quantization (uncomment if needed)
-# onnxmltools>=1.11.0
-# tf2onnx>=1.13.0
-
-# Development and testing
-pytest>=7.0.0
+# Additional utilities
+python-dateutil>=2.8.2
+pytz>=2023.3

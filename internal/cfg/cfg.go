@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/joho/godotenv"
 	"gopkg.in/yaml.v3"
 )
 
@@ -30,6 +31,7 @@ type Settings struct {
 	MaxPriceDistance float64
 	SymbolConfigs    map[string]SymbolConfig
 	RESTTimeout      time.Duration
+	InitialBalance   float64 `env:"INITIAL_BALANCE" envDefault:"10000"`
 }
 
 type SymbolConfig struct {
@@ -77,6 +79,9 @@ type ConfigFile struct {
 }
 
 func Load() (Settings, error) {
+	// Load .env file if it exists (ignore errors as it's optional)
+	_ = godotenv.Load()
+
 	// Try to load from YAML file first
 	if configPath := os.Getenv("CONFIG_FILE"); configPath != "" {
 		return loadFromYAML(configPath)
@@ -129,7 +134,7 @@ func loadFromYAML(path string) (Settings, error) {
 		WsURL:            getEnvOrDefault("WS_URL", config.API.WsURL),
 		Ping:             ping,
 		DataPath:         getEnvOrDefault("DATA_PATH", config.System.DataPath),
-		ModelPath:        getEnvOrDefault("MODEL_PATH", config.ML.ModelPath),
+		ModelPath:        getEnvOrDefault("MODEL_PATH", "models/model.onnx"),
 		VWAPWindow:       vwapWindow,
 		VWAPSize:         getIntFromEnvOrConfig("VWAP_SIZE", config.Features.VWAPSize),
 		TickSize:         getIntFromEnvOrConfig("TICK_SIZE", config.Features.TickSize),
@@ -171,7 +176,7 @@ func loadFromEnv() (Settings, error) {
 		WsURL:            getEnvOrDefault("WS_URL", "wss://fapi.bitunix.com/public"),
 		Ping:             getDurationOrDefault("PING_INTERVAL", 15*time.Second),
 		DataPath:         os.Getenv("DATA_PATH"), // optional
-		ModelPath:        getEnvOrDefault("MODEL_PATH", "model.onnx"),
+		ModelPath:        getEnvOrDefault("MODEL_PATH", "models/model.onnx"),
 		VWAPWindow:       getDurationOrDefault("VWAP_WINDOW", 30*time.Second),
 		VWAPSize:         getIntOrDefault("VWAP_SIZE", 600),
 		TickSize:         getIntOrDefault("TICK_SIZE", 50),
@@ -341,11 +346,11 @@ func validateSettings(settings *Settings) error {
 	}
 
 	// Validate integer values
-	if settings.VWAPSize <= 0 || settings.VWAPSize > 10000 {
-		return fmt.Errorf("VWAP size must be between 1 and 10000, got %d", settings.VWAPSize)
+	if settings.VWAPSize < 10 || settings.VWAPSize > 10000 {
+		return fmt.Errorf("VWAP size must be between 10 and 10000, got %d", settings.VWAPSize)
 	}
-	if settings.TickSize <= 0 || settings.TickSize > 1000 {
-		return fmt.Errorf("tick size must be between 1 and 1000, got %d", settings.TickSize)
+	if settings.TickSize < 10 || settings.TickSize > 1000 {
+		return fmt.Errorf("tick size must be between 10 and 1000, got %d", settings.TickSize)
 	}
 	if settings.MetricsPort < 1024 || settings.MetricsPort > 65535 {
 		return fmt.Errorf("metrics port must be between 1024 and 65535, got %d", settings.MetricsPort)
@@ -353,19 +358,19 @@ func validateSettings(settings *Settings) error {
 
 	// Validate float values - trading parameters
 	if settings.BaseSizeRatio <= 0 || settings.BaseSizeRatio > 0.1 {
-		return fmt.Errorf("base size ratio must be between 0 and 0.1 (10%%), got %f", settings.BaseSizeRatio)
+		return fmt.Errorf("base size ratio must be between 0 and 0.1, got %f", settings.BaseSizeRatio)
 	}
-	if settings.ProbThreshold < 0.5 || settings.ProbThreshold > 0.99 {
+	if settings.ProbThreshold < 0.5 || settings.ProbThreshold >= 1.0 {
 		return fmt.Errorf("probability threshold must be between 0.5 and 0.99, got %f", settings.ProbThreshold)
 	}
-	if settings.MaxDailyLoss <= 0 || settings.MaxDailyLoss > 0.5 {
-		return fmt.Errorf("max daily loss must be between 0 and 0.5 (50%%), got %f", settings.MaxDailyLoss)
+	if settings.MaxDailyLoss < 0 || settings.MaxDailyLoss > 0.5 {
+		return fmt.Errorf("max daily loss must be between 0 and 0.5, got %f", settings.MaxDailyLoss)
 	}
-	if settings.MaxPositionSize <= 0 || settings.MaxPositionSize > 0.2 {
-		return fmt.Errorf("max position size must be between 0 and 0.2 (20%%), got %f", settings.MaxPositionSize)
+	if settings.MaxPositionSize <= 0 || settings.MaxPositionSize > 1.0 {
+		return fmt.Errorf("max position size must be between 0 and 1.0, got %f", settings.MaxPositionSize)
 	}
 	if settings.MaxPriceDistance <= 0 || settings.MaxPriceDistance > 10.0 {
-		return fmt.Errorf("max price distance must be between 0 and 10 standard deviations, got %f", settings.MaxPriceDistance)
+		return fmt.Errorf("max price distance must be between 0 and 10.0, got %f", settings.MaxPriceDistance)
 	}
 
 	// Validate symbol-specific configs
@@ -373,11 +378,11 @@ func validateSettings(settings *Settings) error {
 		if config.BaseSizeRatio <= 0 || config.BaseSizeRatio > 0.1 {
 			return fmt.Errorf("symbol %s: base size ratio must be between 0 and 0.1, got %f", symbol, config.BaseSizeRatio)
 		}
-		if config.MaxPositionSize <= 0 || config.MaxPositionSize > 0.2 {
-			return fmt.Errorf("symbol %s: max position size must be between 0 and 0.2, got %f", symbol, config.MaxPositionSize)
+		if config.MaxPositionSize <= 0 || config.MaxPositionSize > 1.0 {
+			return fmt.Errorf("symbol %s: max position size must be between 0 and 1.0, got %f", symbol, config.MaxPositionSize)
 		}
 		if config.MaxPriceDistance <= 0 || config.MaxPriceDistance > 10.0 {
-			return fmt.Errorf("symbol %s: max price distance must be between 0 and 10, got %f", symbol, config.MaxPriceDistance)
+			return fmt.Errorf("symbol %s: max price distance must be between 0 and 10.0, got %f", symbol, config.MaxPriceDistance)
 		}
 	}
 

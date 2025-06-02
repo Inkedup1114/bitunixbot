@@ -210,8 +210,24 @@ system:
 api:
   key: "yaml_key"
   secret: "yaml_secret"
+  baseURL: "https://api.bitunix.com"
+  wsURL: "wss://fapi.bitunix.com/public"
 trading:
+  symbols: ["BTCUSDT"]
   baseSizeRatio: 0.001
+  maxDailyLoss: 0.05
+  maxPositionSize: 0.01
+  maxPriceDistance: 2.5
+features:
+  vwapWindow: "30s"
+  vwapSize: 500
+  tickSize: 50
+ml:
+  probThreshold: 0.65
+system:
+  metricsPort: 9090
+  pingInterval: "30s"
+  restTimeout: "10s"
 `,
 			envOverrides: map[string]string{
 				"BITUNIX_API_KEY": "env_key",
@@ -308,6 +324,24 @@ func TestLoad(t *testing.T) {
 api:
   key: "yaml_key"
   secret: "yaml_secret"
+  baseURL: "https://api.bitunix.com"
+  wsURL: "wss://fapi.bitunix.com/public"
+trading:
+  symbols: ["BTCUSDT"]
+  baseSizeRatio: 0.002
+  maxDailyLoss: 0.05
+  maxPositionSize: 0.01
+  maxPriceDistance: 2.5
+features:
+  vwapWindow: "30s"
+  vwapSize: 500
+  tickSize: 50
+ml:
+  probThreshold: 0.65
+system:
+  metricsPort: 9090
+  pingInterval: "30s"
+  restTimeout: "10s"
 `,
 			wantErr: false,
 			validate: func(t *testing.T, settings Settings) {

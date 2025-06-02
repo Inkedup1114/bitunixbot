@@ -14,30 +14,14 @@ import (
 type ModelServer struct {
 	predictor *ProductionPredictor
 	server    *http.Server
-}
-
-// PredictionRequest represents the incoming prediction request
-type PredictionRequest struct {
-	Features  []float32 `json:"features"`
-	RequestID string    `json:"request_id,omitempty"`
-}
-
-// PredictionResponse represents the prediction result
-type PredictionResponse struct {
-	Score        float32                `json:"score"`
-	Approved     bool                   `json:"approved"`
-	Threshold    float64                `json:"threshold"`
-	RequestID    string                 `json:"request_id,omitempty"`
-	ModelVersion string                 `json:"model_version"`
-	Latency      float64                `json:"latency_ms"`
-	Timestamp    time.Time              `json:"timestamp"`
-	Metadata     map[string]interface{} `json:"metadata,omitempty"`
+	port      int
 }
 
 // NewModelServer creates a new HTTP server for model serving
 func NewModelServer(predictor *ProductionPredictor, port int) *ModelServer {
 	ms := &ModelServer{
 		predictor: predictor,
+		port:      port,
 	}
 
 	mux := http.NewServeMux()
@@ -59,7 +43,15 @@ func NewModelServer(predictor *ProductionPredictor, port int) *ModelServer {
 
 // Start begins serving HTTP requests
 func (ms *ModelServer) Start() error {
-	log.Info().Str("addr", ms.server.Addr).Msg("starting model server")
+	mux := http.NewServeMux()
+	mux.HandleFunc("/predict", ms.handlePredict)
+	mux.HandleFunc("/health", ms.handleHealth)
+
+	ms.server = &http.Server{
+		Addr:    fmt.Sprintf(":%d", ms.port),
+		Handler: mux,
+	}
+
 	return ms.server.ListenAndServe()
 }
 
@@ -73,8 +65,6 @@ func (ms *ModelServer) handlePredict(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
-	start := time.Now()
 
 	var req PredictionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -95,26 +85,27 @@ func (ms *ModelServer) handlePredict(w http.ResponseWriter, r *http.Request) {
 	score, err := ms.predictor.PredictWithContext(ctx, req.Features)
 	if err != nil {
 		log.Error().Err(err).Msg("prediction failed")
-		http.Error(w, fmt.Sprintf("prediction failed: %v", err), http.StatusInternalServerError)
+		resp := PredictionResponse{
+			Error: fmt.Sprintf("prediction failed: %v", err),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(resp)
 		return
 	}
 
-	// Get threshold from config
-	threshold := ms.predictor.config.FallbackThreshold
-	approved := float64(score) > threshold
+	// Convert score to probabilities format (binary classification)
+	prob0 := float64(1.0 - score)
+	prob1 := float64(score)
 
 	resp := PredictionResponse{
-		Score:        score,
-		Approved:     approved,
-		Threshold:    threshold,
-		RequestID:    req.RequestID,
-		ModelVersion: ms.predictor.metadata.Version,
-		Latency:      float64(time.Since(start).Milliseconds()),
-		Timestamp:    time.Now(),
-		Metadata: map[string]interface{}{
-			"features_received": len(req.Features),
-			"cache_enabled":     ms.predictor.config.CacheSize > 0,
-		},
+		Probabilities: []float64{prob0, prob1},
+		Prediction:    0,
+	}
+
+	// Set prediction based on score
+	if score > 0.5 {
+		resp.Prediction = 1
 	}
 
 	w.Header().Set("Content-Type", "application/json")

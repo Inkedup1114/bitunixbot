@@ -1,0 +1,8 @@
+joblib==1.5.1
+matplotlib==3.10.3
+numpy==1.26.4
+onnxruntime==1.17.3
+pandas==2.2.3
+PyYAML==6.0.2
+scikit-learn==1.6.1
+seaborn==0.13.2

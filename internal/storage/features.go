@@ -12,6 +12,7 @@ import (
 const (
 	featuresBucket = "features"
 	pricesBucket   = "prices"
+	
 )
 
 // FeatureRecord represents a single feature observation
@@ -26,6 +27,9 @@ type FeatureRecord struct {
 	StdDev     float64   `json:"std_dev"`
 	BidVol     float64   `json:"bid_vol"`
 	AskVol     float64   `json:"ask_vol"`
+	RollingVolatility float64 `json:"rolling_volatility"`
+	BidAskSpread      float64 `json:"bid_ask_spread"`
+	VolumeSpike       float64 `json:"volume_spike"`
 }
 
 // PriceRecord represents price data for labeling

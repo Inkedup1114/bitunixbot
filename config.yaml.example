@@ -1,6 +1,5 @@
-// filepath: /home/inkie/projects/bitunix-bot/internal/cfg/config.yaml
 # Example configuration file for bitunix-bot
-# This file can be used instead of or in addition to environment variables
+# Copy this file to config.yaml and update with your values
 
 # API Configuration
 api:
@@ -37,7 +36,7 @@ features:
 
 # ML Configuration
 ml:
-  modelPath: "model.onnx"
+  modelPath: "models/model.onnx"
   probThreshold: 0.65
 
 # System Configuration  

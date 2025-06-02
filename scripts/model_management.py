@@ -12,7 +12,6 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List
-import boto3
 import onnx
 import onnxruntime as ort
 import numpy as np
@@ -46,7 +45,6 @@ class ModelRegistry:
         self.storage_path.mkdir(parents=True, exist_ok=True)
         self.registry_file = self.storage_path / "registry.json"
         self.s3_bucket = s3_bucket
-        self.s3_client = boto3.client('s3') if s3_bucket else None
         self.registry = self._load_registry()
     
     def _load_registry(self) -> Dict[str, Any]:
@@ -101,7 +99,7 @@ class ModelRegistry:
         self._save_registry()
         
         # Upload to S3 if configured
-        if self.s3_client and self.s3_bucket:
+        if self.s3_bucket:
             self._upload_to_s3(stored_path, version)
         
         logger.info(f"Registered model version {version}")
@@ -149,46 +147,36 @@ class ModelRegistry:
         }
     
     def _store_model(self, model_path: Path, version: str) -> Path:
-        """Store model in versioned directory"""
-        version_dir = self.storage_path / version
-        version_dir.mkdir(exist_ok=True)
-        
-        # Copy model
-        dest_path = version_dir / "model.onnx"
-        shutil.copy2(model_path, dest_path)
-        
-        # Store metadata
-        metadata_path = version_dir / "model_metadata.json"
-        with open(metadata_path, 'w') as f:
-            json.dump(self.registry['versions'][version], f, indent=2, default=str)
-        
-        return dest_path
-    
+        """Copy model into the versioned storage folder and return new path."""
+        dest_dir = self.storage_path / version
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dst = dest_dir / model_path.name
+        shutil.copy2(model_path, dst)
+        return dst
+
     def _upload_to_s3(self, model_path: Path, version: str):
-        """Upload model to S3"""
+        """Dummy S3 uploader (no-op if bucket not configured)."""
+        if not self.s3_bucket:
+            return
+        # Lazy import to avoid hard dependency when S3 is unused
+        import boto3, botocore
+        s3 = boto3.client("s3")
         try:
-            s3_key = f"models/{version}/model.onnx"
-            self.s3_client.upload_file(str(model_path), self.s3_bucket, s3_key)
-            logger.info(f"Uploaded model to s3://{self.s3_bucket}/{s3_key}")
-        except Exception as e:
-            logger.error(f"Failed to upload to S3: {e}")
-    
+            s3.upload_file(str(model_path), self.s3_bucket, f"{version}/{model_path.name}")
+        except botocore.exceptions.BotoCoreError as e:
+            logger.warning(f"S3 upload failed: {e}")
+
     def deploy_model(self, version: str, environment: str = "production"):
-        """Deploy a specific model version"""
-        if version not in self.registry['versions']:
-            raise ValueError(f"Version {version} not found")
-        
-        # Update deployment record
-        self.registry['deployments'][environment] = {
-            'version': version,
-            'deployed_at': datetime.now().isoformat(),
-            'deployed_by': os.environ.get('USER', 'unknown'),
+        """Mark a version as deployed for a given environment."""
+        if version not in self.registry["versions"]:
+            raise ValueError(f"Unknown version {version}")
+        self.registry["deployments"][environment] = {
+            "version": version,
+            "timestamp": datetime.utcnow().isoformat()
         }
-        
-        # Update current if production
+        # Track current production version for quick access
         if environment == "production":
-            self.registry['current'] = version
-        
+            self.registry["current"] = version
         self._save_registry()
         logger.info(f"Deployed version {version} to {environment}")
     
@@ -197,28 +185,30 @@ class ModelRegistry:
         return self.registry.get('current')
     
     def get_model_path(self, version: Optional[str] = None) -> Optional[Path]:
-        """Get path to specific model version"""
+        """Return local path of a model version (current if None)."""
         if version is None:
-            version = self.get_current_version()
-        
-        if version and version in self.registry['versions']:
-            return Path(self.registry['versions'][version]['path'])
+            version = self.registry.get("current")
+        if version and version in self.registry["versions"]:
+            return Path(self.registry["versions"][version]["path"])
         return None
     
     def list_versions(self) -> List[Dict[str, Any]]:
-        """List all registered versions"""
-        versions = []
-        for version, info in self.registry['versions'].items():
-            versions.append({
-                'version': version,
-                'timestamp': info['timestamp'],
-                'accuracy': info['accuracy'],
-                'size_mb': info['size_bytes'] / 1024 / 1024,
-                'is_current': version == self.registry.get('current'),
-                'deployments': [env for env, deploy in self.registry['deployments'].items() 
-                               if deploy['version'] == version]
-            })
-        return sorted(versions, key=lambda x: x['timestamp'], reverse=True)
+        """Return sorted list of versions with meta information."""
+        versions: List[Dict[str, Any]] = []
+        for v, info in self.registry["versions"].items():
+            versions.append(
+                {
+                    "version": v,
+                    "timestamp": info.get("timestamp"),
+                    "accuracy": info.get("accuracy"),
+                    "size_mb": info.get("size_mb"),
+                    "is_current": v == self.registry.get("current"),
+                    "deployments": [
+                        env for env, d in self.registry["deployments"].items() if d["version"] == v
+                    ],
+                }
+            )
+        return sorted(versions, key=lambda x: x["timestamp"], reverse=True)
     
     def rollback(self, environment: str = "production"):
         """Rollback to previous version"""
@@ -308,19 +298,17 @@ def main():
     registry = ModelRegistry(args.storage_path, args.s3_bucket)
     
     if args.command == 'register':
-        metadata = {
-            'accuracy': args.accuracy,
-            'validation_accuracy': args.validation_accuracy,
-            'training_rows': args.training_rows,
-            **args.metadata
-        }
-        version = registry.register_model(args.model_path, metadata)
-        print(f"Registered model version: {version.version}")
+        version = registry.register_model(args.model_path)
+        print(f"Model registered with version: {version}")
         
     elif args.command == 'deploy':
-        registry.deploy_model(args.version, args.environment)
-        print(f"Deployed {args.version} to {args.environment}")
-        
+        success = registry.deploy_model(args.version, args.environment)
+        if success:
+            print(f"Model {args.version} deployed to {args.environment}")
+        else:
+            print(f"Failed to deploy model {args.version}")
+            return 1
+            
     elif args.command == 'list':
         versions = registry.list_versions()
         for v in versions:
@@ -337,4 +325,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    exit(main())

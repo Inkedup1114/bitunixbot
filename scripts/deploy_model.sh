@@ -115,6 +115,20 @@ log "  Symbol filter: ${SYMBOL:-'all'}"
 log "  Restart bot: $RESTART_BOT"
 log "  Backup model: $BACKUP_MODEL"
 
+# Activate virtual environment if available
+if [[ -f "$PROJECT_ROOT/venv/bin/activate" ]]; then
+    log "Activating virtual environment..."
+    source "$PROJECT_ROOT/venv/bin/activate"
+    export PATH="$PROJECT_ROOT/venv/bin:$PATH"
+    log "Virtual environment activated: $VIRTUAL_ENV"
+elif [[ -z "$VIRTUAL_ENV" ]]; then
+    warn "No virtual environment found. Creating one..."
+    python3 -m venv "$PROJECT_ROOT/venv"
+    source "$PROJECT_ROOT/venv/bin/activate"
+    export PATH="$PROJECT_ROOT/venv/bin:$PATH"
+    log "New virtual environment created and activated"
+fi
+
 # Step 1: Export data from BoltDB
 log "Step 1: Exporting training data..."
 export_cmd="go run $SCRIPT_DIR/export_data.go -db '$DB_PATH' -output '$SCRIPT_DIR/training_data.json' -days $TRAINING_DAYS"
@@ -148,7 +162,19 @@ fi
 # Step 4: Install Python dependencies
 log "Step 3: Installing Python dependencies..."
 cd "$SCRIPT_DIR"
-if ! pip3 install -r requirements.txt > "$LOGS_DIR/pip_install.log" 2>&1; then
+
+# Ensure we're in a virtual environment
+if [[ -z "$VIRTUAL_ENV" ]]; then
+    warn "Not in virtual environment. Activating..."
+    if [[ -f "$PROJECT_ROOT/venv/bin/activate" ]]; then
+        source "$PROJECT_ROOT/venv/bin/activate"
+    else
+        python3 -m venv "$PROJECT_ROOT/venv"
+        source "$PROJECT_ROOT/venv/bin/activate"
+    fi
+fi
+
+if ! pip install -r requirements.txt > "$LOGS_DIR/pip_install.log" 2>&1; then
     error "Failed to install Python dependencies. Check $LOGS_DIR/pip_install.log for details."
 fi
 

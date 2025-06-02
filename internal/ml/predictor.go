@@ -66,7 +66,7 @@ func NewWithMetrics(path string, metrics MetricsInterface, timeout time.Duration
 
 	// Check if model file exists
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		log.Warn().Str("model_path", path).Msg("ONNX model not found, using fallback heuristics")
+		log.Warn().Str("model_path", path).Msg("ONNX model not found, ML features will be disabled")
 		return &Predictor{
 			available:    false,
 			threshold:    0.65,
@@ -91,18 +91,29 @@ func NewWithMetrics(path string, metrics MetricsInterface, timeout time.Duration
 		}, nil
 	}
 
-	// Create inference script path
-	scriptPath := filepath.Join(filepath.Dir(path), "onnx_inference.py")
-	if err := createInferenceScript(scriptPath); err != nil {
-		log.Warn().Err(err).Msg("Failed to create inference script, using fallback")
-		return &Predictor{
-			available:    false,
-			threshold:    0.65,
-			modelPath:    path,
-			timeout:      timeout,
-			modelCreated: modelCreated,
-			metrics:      metrics,
-		}, nil
+	// Create inference script path - first check if standalone script exists
+	scriptDir := filepath.Dir(path)
+	scriptPath := filepath.Join(scriptDir, "onnx_inference.py")
+
+	// If standalone script doesn't exist, try scripts directory
+	if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
+		scriptPath = filepath.Join(filepath.Dir(filepath.Dir(path)), "scripts", "onnx_inference.py")
+	}
+
+	// If still not found, create embedded script
+	if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
+		scriptPath = filepath.Join(scriptDir, "onnx_inference_embedded.py")
+		if err := createInferenceScript(scriptPath); err != nil {
+			log.Warn().Err(err).Msg("Failed to create inference script, using fallback")
+			return &Predictor{
+				available:    false,
+				threshold:    0.65,
+				modelPath:    path,
+				timeout:      timeout,
+				modelCreated: modelCreated,
+				metrics:      metrics,
+			}, nil
+		}
 	}
 
 	p := &Predictor{
@@ -376,29 +387,94 @@ func (p *Predictor) healthCheck() error {
 }
 
 func findPython() (string, error) {
-	// Try common Python executable names
-	candidates := []string{"python3", "python", "python3.9", "python3.10", "python3.11"}
+	// First try to find virtual environment Python
+	if venvPath := os.Getenv("VIRTUAL_ENV"); venvPath != "" {
+		// Try both bin and Scripts (Windows) directories
+		candidates := []string{
+			filepath.Join(venvPath, "bin", "python3"),
+			filepath.Join(venvPath, "bin", "python"),
+			filepath.Join(venvPath, "Scripts", "python.exe"),
+			filepath.Join(venvPath, "Scripts", "python3.exe"),
+		}
+
+		for _, venvPython := range candidates {
+			if _, err := os.Stat(venvPython); err == nil {
+				// Verify it's Python 3 with ONNX Runtime
+				cmd := exec.Command(venvPython, "-c", "import sys, onnxruntime; print('Python', sys.version)")
+				if output, err := cmd.Output(); err == nil && strings.Contains(string(output), "Python 3") {
+					log.Info().Str("python_path", venvPython).Msg("Using virtual environment Python")
+					return venvPython, nil
+				}
+			}
+		}
+	}
+
+	// Try to find venv relative to executable location
+	if execPath, err := os.Executable(); err == nil {
+		execDir := filepath.Dir(execPath)
+		projectRoots := []string{
+			execDir,
+			filepath.Dir(execDir),
+			filepath.Dir(filepath.Dir(execDir)),
+		}
+
+		for _, root := range projectRoots {
+			venvCandidates := []string{
+				filepath.Join(root, "venv", "bin", "python3"),
+				filepath.Join(root, "venv", "bin", "python"),
+				filepath.Join(root, ".venv", "bin", "python3"),
+				filepath.Join(root, ".venv", "bin", "python"),
+				filepath.Join(root, "venv", "Scripts", "python.exe"),
+			}
+
+			for _, venvPython := range venvCandidates {
+				if _, err := os.Stat(venvPython); err == nil {
+					// Verify it has ONNX Runtime
+					cmd := exec.Command(venvPython, "-c", "import sys, onnxruntime; print('Python', sys.version)")
+					if output, err := cmd.Output(); err == nil && strings.Contains(string(output), "Python 3") {
+						log.Info().Str("python_path", venvPython).Msg("Using project virtual environment Python")
+						return venvPython, nil
+					}
+				}
+			}
+		}
+	}
+
+	// Try common Python executable names as fallback
+	candidates := []string{"python3", "python", "python3.12", "python3.11", "python3.10", "python3.9", "python3.8"}
 
 	for _, candidate := range candidates {
 		path, err := exec.LookPath(candidate)
 		if err == nil {
-			// Verify it's Python 3
-			cmd := exec.Command(path, "--version")
+			// Verify it's Python 3 and has ONNX Runtime
+			cmd := exec.Command(path, "-c", "import sys, onnxruntime; print('Python', sys.version)")
 			output, err := cmd.Output()
 			if err == nil && strings.Contains(string(output), "Python 3") {
+				log.Info().Str("python_path", path).Msg("Using system Python")
 				return path, nil
 			}
 		}
 	}
 
-	return "", fmt.Errorf("no suitable Python 3 executable found")
+	// If no Python with ONNX Runtime found, return the best Python 3 we can find
+	for _, candidate := range candidates {
+		path, err := exec.LookPath(candidate)
+		if err == nil {
+			cmd := exec.Command(path, "-c", "import sys; exit(0 if sys.version_info[0] == 3 else 1)")
+			if err := cmd.Run(); err == nil {
+				log.Warn().Str("python_path", path).Msg("Found Python 3 but ONNX Runtime may not be installed")
+				return path, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("no suitable Python 3 executable found; please install Python 3.8-3.12")
 }
 
 func createInferenceScript(scriptPath string) error {
 	script := `#!/usr/bin/env python3
 """
-ONNX Inference Script for Bitunix Trading Bot
-Reads JSON from stdin, returns prediction JSON to stdout
+ONNX Inference Script for Bitunix Trading Bot (Embedded Version)
 """
 import sys
 import json
@@ -427,15 +503,33 @@ def main():
         input_name = session.get_inputs()[0].name
         
         # Run inference
-        result = session.run(None, {input_name: features})
+        outputs = session.run(None, {input_name: features})
         
-        # Format response
-        if len(result) >= 2:
-            probabilities = result[1][0].tolist()  # Get probability scores
-            prediction = int(result[0][0])         # Get class prediction
+        # Handle different output formats from sklearn models
+        if len(outputs) == 2:
+            # Standard format: [predictions, probabilities]
+            prediction = int(outputs[0][0])
+            probabilities = outputs[1][0].tolist()
+        elif len(outputs) == 1:
+            # Single output - determine if it's probabilities or predictions
+            output = outputs[0]
+            if len(output.shape) > 1 and output.shape[-1] == 2:
+                # Probabilities array
+                probabilities = output[0].tolist()
+                prediction = int(np.argmax(probabilities))
+            else:
+                # Single prediction value
+                prediction = int(output[0] > 0.5)
+                # Create probability array for binary classification
+                prob_positive = float(output[0]) if output[0] >= 0 and output[0] <= 1 else 0.5
+                probabilities = [1.0 - prob_positive, prob_positive]
         else:
-            probabilities = result[0][0].tolist()
-            prediction = int(np.argmax(probabilities))
+            raise ValueError(f"Unexpected number of outputs: {len(outputs)}")
+        
+        # Normalize probabilities if needed
+        prob_sum = sum(probabilities)
+        if abs(prob_sum - 1.0) > 0.01:
+            probabilities = [p / prob_sum for p in probabilities]
         
         response = {
             "probabilities": probabilities,

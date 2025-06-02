@@ -107,28 +107,33 @@ func main() {
 		MinConfidence:     0.5,
 	}
 
-	pred, err := ml.NewProductionPredictor(mlConfig, mw)
+	// Create executor with appropriate predictor
+	var exe *exec.Exec
+	prod, err := ml.NewProductionPredictor(mlConfig, mw)
 	if err != nil {
 		log.Warn().Err(err).Msg("ML model unavailable, using fallback")
 		// Create basic predictor as fallback
-		pred, _ = ml.NewWithMetrics(c.ModelPath, mw, 5*time.Second)
-	}
+		basicPred, _ := ml.NewWithMetrics(c.ModelPath, mw, 5*time.Second)
+		exe = exec.New(c, basicPred, mw)
+	} else {
+		// Explicitly cast to interface to ensure compatibility
+		var predictor ml.PredictorInterface = prod
+		exe = exec.New(c, predictor, mw)
 
-	// Start ML model server if enabled
-	if mlPort := os.Getenv("ML_SERVER_PORT"); mlPort != "" {
-		port, _ := strconv.Atoi(mlPort)
-		if port > 0 {
-			mlServer := ml.NewModelServer(pred, port)
-			go func() {
-				if err := mlServer.Start(); err != nil && err != http.ErrServerClosed {
-					log.Error().Err(err).Msg("ML server failed")
-				}
-			}()
-			defer mlServer.Shutdown(context.Background())
+		// Start ML model server if enabled (only for ProductionPredictor)
+		if mlPort := os.Getenv("ML_SERVER_PORT"); mlPort != "" {
+			port, _ := strconv.Atoi(mlPort)
+			if port > 0 {
+				mlServer := ml.NewModelServer(prod, port)
+				go func() {
+					if err := mlServer.Start(); err != nil && err != http.ErrServerClosed {
+						log.Error().Err(err).Msg("ML server failed")
+					}
+				}()
+				defer mlServer.Shutdown(context.Background())
+			}
 		}
 	}
-
-	exe := exec.New(c, pred, mw, store)
 
 	// Error handler goroutine
 	wg.Add(1)

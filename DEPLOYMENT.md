@@ -81,8 +81,9 @@ The Bitunix Trading Bot supports deployment across multiple environments with di
 
 3. **Development configuration**:
    ```bash
-   # Create development environment file
+   # Create development environment file (DO NOT commit with real credentials)
    cat > .env.dev << EOF
+   # Development API credentials (replace with your actual keys)
    BITUNIX_API_KEY="your_development_api_key"
    BITUNIX_SECRET_KEY="your_development_secret_key"
    DRY_RUN=true
@@ -91,6 +92,9 @@ The Bitunix Trading Bot supports deployment across multiple environments with di
    ML_TIMEOUT=30s
    METRICS_PORT=8080
    EOF
+   
+   # Set proper permissions
+   chmod 600 .env.dev
    
    # Load environment
    source .env.dev
@@ -1093,7 +1097,7 @@ helm install bitunix-bot ./bitunix-bot-chart \
      --workspace-name bitunix-bot-logs
    
    # Get workspace ID
-   WORKSPACE_ID=$(az monitor log-analytics workspace show \
+   WORKSPACE_ID=$(az monitor.log-analytics.workspace show \
      --resource-group bitunix-bot-rg \
      --workspace-name bitunix-bot-logs \
      --query customerId -o tsv)
@@ -1963,6 +1967,7 @@ data:
            image: redis:7-alpine
            ports:
            - containerPort: 6379
+             name: metrics
            args:
            - redis-server
            - --maxmemory 256mb
@@ -2130,3 +2135,11 @@ data:
    ```
 
 This comprehensive deployment guide covers all aspects of deploying and maintaining the Bitunix Trading Bot in production environments with enterprise-grade security, monitoring, and reliability features.
+
+## Monitoring and Alerts
+
+- **Model Accuracy**: Alert if AUC < 0.65 or F1 < 0.3
+- **Trade Execution**: Alert if latency > 500ms or slippage > 0.1%
+- **Daily P&L**: Alert if daily loss exceeds predefined risk limits
+
+Use Grafana dashboards to monitor these metrics continuously.

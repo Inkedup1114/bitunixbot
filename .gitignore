@@ -11,8 +11,9 @@ venv/
 *.pyd
 # Ignore all files in site-packages (for local venvs)
 **/site-packages/
-# Ignore ONNX and model binaries if not needed
-*.onnx
+# Ignore ONNX and model binaries
+models/*.onnx
+!models/.gitkeep
 # Ignore Jupyter notebook checkpoints
 .ipynb_checkpoints/
 # Ignore Python cache and build artifacts

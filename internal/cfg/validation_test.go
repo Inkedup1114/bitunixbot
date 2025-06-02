@@ -306,7 +306,8 @@ func TestValidateSettings_InvalidVWAPSize(t *testing.T) {
 	}{
 		{"zero", 0, true},
 		{"negative", -1, true},
-		{"minimum valid", 1, false},
+		{"too small", 9, true},
+		{"minimum valid", 10, false},
 		{"normal", 500, false},
 		{"maximum valid", 10000, false},
 		{"too large", 10001, true},
