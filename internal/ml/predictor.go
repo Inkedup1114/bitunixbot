@@ -1,16 +1,22 @@
 package ml
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"bitunix-bot/internal/metrics"
 
 	"github.com/rs/zerolog/log"
 )
@@ -27,7 +33,15 @@ type MetricsInterface interface {
 	MLFallbackUseInc()
 }
 
+// cacheEntry represents a cached prediction
+type cacheEntry struct {
+	score     float32
+	timestamp time.Time
+}
+
+// Predictor implements the ML prediction interface
 type Predictor struct {
+	mu            sync.Mutex
 	available     bool
 	threshold     float64
 	modelPath     string
@@ -39,6 +53,13 @@ type Predictor struct {
 	timeout       time.Duration
 	modelCreated  time.Time
 	metrics       MetricsInterface
+	cmd           *exec.Cmd
+	stdin         io.WriteCloser
+	stdout        io.ReadCloser
+	stderr        io.ReadCloser
+	cache         map[string]cacheEntry
+	cacheSize     int
+	cacheTTL      time.Duration
 }
 
 type PredictionRequest struct {
@@ -49,6 +70,232 @@ type PredictionResponse struct {
 	Probabilities []float64 `json:"probabilities"`
 	Prediction    int       `json:"prediction"`
 	Error         string    `json:"error,omitempty"`
+}
+
+// NativePredictor implements fast ONNX inference
+type NativePredictor struct {
+	session    *onnxruntime.Session
+	inputName  string
+	outputName string
+	cache      *PredictionCache
+	mu         sync.RWMutex
+	metrics    MetricsInterface
+}
+
+// NewNativePredictor creates a new native ONNX predictor
+func NewNativePredictor(modelPath string, metrics MetricsInterface) (*NativePredictor, error) {
+	// Initialize ONNX runtime session
+	session, err := onnxruntime.NewSession(modelPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create ONNX session: %w", err)
+	}
+
+	// Get input/output names
+	inputName := session.GetInputName(0)
+	outputName := session.GetOutputName(0)
+
+	return &NativePredictor{
+		session:    session,
+		inputName:  inputName,
+		outputName: outputName,
+		cache: &PredictionCache{
+			cache:   make(map[string]*CachedPrediction),
+			maxSize: 1000,
+			ttl:     5 * time.Minute,
+		},
+		metrics: metrics,
+	}, nil
+}
+
+// BatchPredict performs inference on multiple feature vectors
+func (p *NativePredictor) BatchPredict(features [][]float32) ([][]float32, error) {
+	if len(features) == 0 {
+		return nil, nil
+	}
+
+	start := time.Now()
+	defer func() {
+		if p.metrics != nil {
+			p.metrics.MLLatencyObserve(time.Since(start).Seconds())
+		}
+	}()
+
+	// Convert features to float32 array
+	batchSize := len(features)
+	featureSize := len(features[0])
+	input := make([]float32, batchSize*featureSize)
+
+	for i, f := range features {
+		copy(input[i*featureSize:], f)
+	}
+
+	// Run inference
+	output, err := p.session.Run([]string{p.inputName}, [][]float32{input})
+	if err != nil {
+		if p.metrics != nil {
+			p.metrics.MLFailuresInc()
+		}
+		return nil, fmt.Errorf("inference failed: %w", err)
+	}
+
+	// Process output
+	results := make([][]float32, batchSize)
+	for i := 0; i < batchSize; i++ {
+		results[i] = make([]float32, 2)    // Binary classification
+		results[i][0] = 1.0 - output[0][i] // Probability of no signal
+		results[i][1] = output[0][i]       // Probability of signal
+	}
+
+	if p.metrics != nil {
+		p.metrics.MLPredictionsInc()
+	}
+
+	return results, nil
+}
+
+// Predict implements single prediction with caching
+func (p *NativePredictor) Predict(features []float32) ([]float32, error) {
+	// Check cache first
+	cacheKey := p.getCacheKey(features)
+	if cached := p.getFromCache(cacheKey); cached != nil {
+		return []float32{1.0 - cached.Score, cached.Score}, nil
+	}
+
+	// Perform batch prediction with single item
+	results, err := p.BatchPredict([][]float32{features})
+	if err != nil {
+		return nil, err
+	}
+
+	// Cache result
+	p.putInCache(cacheKey, results[0][1])
+
+	return results[0], nil
+}
+
+// getCacheKey generates a cache key from features
+func (p *NativePredictor) getCacheKey(features []float32) string {
+	// Use a fast hash function for features
+	var h uint64
+	for _, f := range features {
+		h = h*31 + uint64(math.Float32bits(f))
+	}
+	return fmt.Sprintf("%x", h)
+}
+
+// getFromCache retrieves a cached prediction
+func (p *NativePredictor) getFromCache(key string) *CachedPrediction {
+	p.cache.mu.RLock()
+	defer p.cache.mu.RUnlock()
+
+	if cached, ok := p.cache.cache[key]; ok {
+		if time.Since(cached.Timestamp) < p.cache.ttl {
+			return cached
+		}
+	}
+	return nil
+}
+
+// putInCache stores a prediction in cache
+func (p *NativePredictor) putInCache(key string, score float32) {
+	p.cache.mu.Lock()
+	defer p.cache.mu.Unlock()
+
+	// Check if cache is full
+	if len(p.cache.cache) >= p.cache.maxSize {
+		// Remove oldest entry
+		var oldestKey string
+		var oldestTime time.Time
+		for k, v := range p.cache.cache {
+			if oldestTime.IsZero() || v.Timestamp.Before(oldestTime) {
+				oldestTime = v.Timestamp
+				oldestKey = k
+			}
+		}
+		delete(p.cache.cache, oldestKey)
+	}
+
+	p.cache.cache[key] = &CachedPrediction{
+		Score:     score,
+		Timestamp: time.Now(),
+	}
+}
+
+// FastPredictorConfig holds configuration for the fast predictor
+type FastPredictorConfig struct {
+	ModelPath   string
+	BatchSize   int
+	Timeout     time.Duration
+	CacheSize   int
+	CacheTTL    time.Duration
+	EnableCache bool
+}
+
+// NewFastPredictor creates a new fast predictor with optimized settings
+func NewFastPredictor(cfg FastPredictorConfig, m *metrics.MetricsWrapper) (*Predictor, error) {
+	// Start Python subprocess with optimized predictor
+	cmd := exec.Command("python", "-c", `
+import sys
+sys.path.append('.')
+from internal.ml.fast_predictor import FastPredictor
+predictor = FastPredictor("`+cfg.ModelPath+`", batch_size=`+strconv.Itoa(cfg.BatchSize)+`)
+while True:
+    try:
+        line = input()
+        if not line:
+            continue
+        features = [float(x) for x in line.split(',')]
+        result = predictor.predict(features)
+        if result is not None:
+            print(','.join(map(str, result)))
+        else:
+            print("")
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print("")
+`)
+
+	// Set up pipes
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stdin pipe: %v", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stdout pipe: %v", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stderr pipe: %v", err)
+	}
+
+	// Start the process
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start Python process: %v", err)
+	}
+
+	// Create predictor with optimized settings
+	p := &Predictor{
+		cmd:       cmd,
+		stdin:     stdin,
+		stdout:    stdout,
+		stderr:    stderr,
+		timeout:   cfg.Timeout,
+		metrics:   m,
+		available: true,
+	}
+
+	// Initialize cache if enabled
+	if cfg.EnableCache {
+		p.cache = make(map[string]cacheEntry, cfg.CacheSize)
+		p.cacheSize = cfg.CacheSize
+		p.cacheTTL = cfg.CacheTTL
+	}
+
+	// Start error handler
+	go p.handleErrors()
+
+	return p, nil
 }
 
 func New(path string) (*Predictor, error) {
@@ -144,7 +391,7 @@ func NewWithMetrics(path string, metrics MetricsInterface, timeout time.Duration
 	return p, nil
 }
 
-// features = [tickRatio, depthRatio, priceDist]
+// Approve implements PredictorInterface
 func (p *Predictor) Approve(f []float32, threshold float64) bool {
 	if p == nil {
 		return false
@@ -170,8 +417,8 @@ func (p *Predictor) Approve(f []float32, threshold float64) bool {
 
 			// Simple rules: trade when there's momentum, good depth signal,
 			// and price isn't too far from VWAP
-			confidence := (abs(tickRatio) + abs(depthRatio)) / 2.0
-			result := confidence > float32(threshold-0.5) && abs(priceDist) < 2.0
+			confidence := float32((math.Abs(float64(tickRatio)) + math.Abs(float64(depthRatio))) / 2.0)
+			result := confidence > float32(threshold-0.5) && math.Abs(float64(priceDist)) < 2.0
 
 			// Track prediction (even heuristic) and fallback usage
 			if p.metrics != nil {
@@ -184,15 +431,15 @@ func (p *Predictor) Approve(f []float32, threshold float64) bool {
 		return false
 	}
 
-	// Use ONNX model for prediction
+	// Use Python subprocess for prediction
 	predictions, err := p.predictInternal(f)
 	if err != nil {
-		log.Error().Err(err).Msg("ONNX prediction failed, falling back to heuristics")
+		log.Error().Err(err).Msg("Python prediction failed, falling back to heuristics")
 		// Track failure
 		if p.metrics != nil {
 			p.metrics.MLFailuresInc()
 		}
-		// Fall back to heuristic if ONNX fails
+		// Fall back to heuristic if Python fails
 		p.available = false
 		return p.Approve(f, threshold)
 	}
@@ -547,12 +794,13 @@ if __name__ == "__main__":
     main()
 `
 
-	return os.WriteFile(scriptPath, []byte(script), 0755)
+	return os.WriteFile(scriptPath, []byte(script), 0o755)
 }
 
-func abs(x float32) float32 {
-	if x < 0 {
-		return -x
+func (p *Predictor) handleErrors() {
+	scanner := bufio.NewScanner(p.stderr)
+	for scanner.Scan() {
+		line := scanner.Text()
+		log.Error().Str("error", line).Msg("Python error")
 	}
-	return x
 }

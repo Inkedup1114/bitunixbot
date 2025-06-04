@@ -1,14 +1,22 @@
 # Example configuration file for bitunix-bot
 # Copy this file to config.yaml and update with your values
+# WARNING: Never commit your actual API keys to version control!
 
 # API Configuration
+# IMPORTANT: API keys must be set via environment variables:
+# - BITUNIX_API_KEY
+# - BITUNIX_SECRET_KEY
 api:
-  key: "your_api_key_here"
-  secret: "your_secret_key_here"
+  key: ""  # Set via BITUNIX_API_KEY env var
+  secret: ""  # Set via BITUNIX_SECRET_KEY env var
   baseURL: "https://api.bitunix.com"
   wsURL: "wss://fapi.bitunix.com/public"
 
 # Trading Configuration
+# WARNING: Live trading requires:
+# 1. dryRun: false
+# 2. FORCE_LIVE_TRADING=true environment variable
+# 3. Valid API keys with trading permissions
 trading:
   symbols:
     - "BTCUSDT"
@@ -17,7 +25,7 @@ trading:
   maxPositionSize: 0.01  # 1% max position per symbol
   maxDailyLoss: 0.05     # 5% max daily loss
   maxPriceDistance: 3.0  # 3 standard deviations max
-  dryRun: true
+  dryRun: true  # Set to false ONLY for live trading
 
 # Symbol-specific configuration
 symbolConfig:

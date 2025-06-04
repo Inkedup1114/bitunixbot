@@ -1,0 +1,41 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Launch Bitunix Bot",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "${workspaceFolder}/cmd/bitrader",
+            "args": [],
+            "env": {
+                "BITUNIX_API_KEY": "${env:BITUNIX_API_KEY}",
+                "BITUNIX_SECRET_KEY": "${env:BITUNIX_SECRET_KEY}"
+            },
+            "showLog": true,
+            "trace": "verbose"
+        },
+        {
+            "name": "Test Current File",
+            "type": "go",
+            "request": "launch",
+            "mode": "test",
+            "program": "${fileDirname}",
+            "args": [
+                "-test.v"
+            ],
+            "showLog": true
+        },
+        {
+            "name": "Test Current Package",
+            "type": "go",
+            "request": "launch",
+            "mode": "test",
+            "program": "${workspaceFolder}",
+            "args": [
+                "-test.v"
+            ],
+            "showLog": true
+        }
+    ]
+}

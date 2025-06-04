@@ -1,13 +1,6 @@
 package main
 
 import (
-	"bitunix-bot/internal/cfg"
-	"bitunix-bot/internal/exchange/bitunix"
-	"bitunix-bot/internal/exec"
-	"bitunix-bot/internal/features"
-	"bitunix-bot/internal/metrics"
-	"bitunix-bot/internal/ml"
-	"bitunix-bot/internal/storage"
 	"context"
 	"fmt"
 	"net/http"
@@ -17,6 +10,14 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"bitunix-bot/internal/cfg"
+	"bitunix-bot/internal/exchange/bitunix"
+	"bitunix-bot/internal/exec"
+	"bitunix-bot/internal/features"
+	"bitunix-bot/internal/metrics"
+	"bitunix-bot/internal/ml"
+	"bitunix-bot/internal/storage"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog/log"
@@ -48,9 +49,9 @@ func main() {
 	}
 
 	// Channels (buffered to prevent blocking)
-	trades := make(chan bitunix.Trade, 1024)
-	depths := make(chan bitunix.Depth, 1024)
-	errors := make(chan error, 100)
+	trades := make(chan bitunix.Trade, 64) // Reduced buffer size for lower latency
+	depths := make(chan bitunix.Depth, 64) // Reduced buffer size for lower latency
+	errors := make(chan error, 32)         // Reduced buffer size for lower latency
 
 	// Start metrics server
 	go func() {
@@ -84,32 +85,29 @@ func main() {
 	}()
 
 	// Feature buffers per symbol with thread-safe access
-	vwapMap := make(map[string]*features.VWAP)
+	vwapMap := make(map[string]*features.FastVWAP) // Using optimized FastVWAP
 	ticksMap := make(map[string]*features.TickImb)
 	lastPriceMap := sync.Map{} // Thread-safe map for lastPrice
 
 	for _, s := range c.Symbols {
-		vwapMap[s] = features.NewVWAP(c.VWAPWindow, c.VWAPSize)
+		vwapMap[s] = features.NewFastVWAP(c.VWAPWindow, c.VWAPSize)
 		ticksMap[s] = features.NewTickImb(c.TickSize)
 		lastPriceMap.Store(s, 0.0)
 	}
 
 	// Initialize production ML predictor
-	mlConfig := ml.PredictorConfig{
-		ModelPath:         c.ModelPath,
-		FallbackThreshold: c.ProbThreshold,
-		MaxRetries:        3,
-		RetryDelay:        time.Second,
-		CacheSize:         1000,
-		CacheTTL:          5 * time.Minute,
-		EnableProfiling:   os.Getenv("ML_PROFILING") == "true",
-		EnableValidation:  true,
-		MinConfidence:     0.5,
+	mlConfig := ml.FastPredictorConfig{
+		ModelPath:   c.ModelPath,
+		BatchSize:   32,
+		Timeout:     5 * time.Millisecond,
+		CacheSize:   1000,
+		CacheTTL:    5 * time.Minute,
+		EnableCache: true,
 	}
 
 	// Create executor with appropriate predictor
 	var exe *exec.Exec
-	prod, err := ml.NewProductionPredictor(mlConfig, mw)
+	prod, err := ml.NewFastPredictor(mlConfig, mw)
 	if err != nil {
 		log.Warn().Err(err).Msg("ML model unavailable, using fallback")
 		// Create basic predictor as fallback
@@ -120,17 +118,35 @@ func main() {
 		var predictor ml.PredictorInterface = prod
 		exe = exec.New(c, predictor, mw)
 
-		// Start ML model server if enabled (only for ProductionPredictor)
+		// Start ML model server if enabled
 		if mlPort := os.Getenv("ML_SERVER_PORT"); mlPort != "" {
 			port, _ := strconv.Atoi(mlPort)
 			if port > 0 {
-				mlServer := ml.NewModelServer(prod, port)
-				go func() {
-					if err := mlServer.Start(); err != nil && err != http.ErrServerClosed {
-						log.Error().Err(err).Msg("ML server failed")
-					}
-				}()
-				defer mlServer.Shutdown(context.Background())
+				// Create a production predictor for the model server
+				prodConfig := ml.PredictorConfig{
+					ModelPath:         c.ModelPath,
+					FallbackThreshold: 0.65,
+					MaxRetries:        3,
+					RetryDelay:        100 * time.Millisecond,
+					CacheSize:         1000,
+					CacheTTL:          5 * time.Minute,
+					EnableProfiling:   true,
+					EnableValidation:  true,
+					MinConfidence:     0.6,
+				}
+				prodPredictor, err := ml.NewProductionPredictor(prodConfig, mw)
+				if err != nil {
+					log.Error().Err(err).Msg("Failed to create production predictor for model server")
+				} else {
+					// Create a new model server with the production predictor
+					mlServer := ml.NewModelServer(prodPredictor, port)
+					go func() {
+						if err := mlServer.Start(); err != nil && err != http.ErrServerClosed {
+							log.Error().Err(err).Msg("ML server failed")
+						}
+					}()
+					defer mlServer.Shutdown(context.Background())
+				}
 			}
 		}
 	}
@@ -151,87 +167,58 @@ func main() {
 		}
 	}()
 
-	// Depth handler goroutine
+	// Depth handler goroutine with batch processing
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		batchSize := 10
+		depthBatch := make([]bitunix.Depth, 0, batchSize)
+		ticker := time.NewTicker(1 * time.Millisecond) // Process every 1ms
+		defer ticker.Stop()
+
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case d := <-depths:
-				// Thread-safe price access
-				priceVal, ok := lastPriceMap.Load(d.Symbol)
-				if !ok {
-					continue
+				depthBatch = append(depthBatch, d)
+				if len(depthBatch) >= batchSize {
+					processDepthBatch(depthBatch, vwapMap, ticksMap, lastPriceMap, exe, store, mw)
+					depthBatch = depthBatch[:0]
 				}
-				price, ok := priceVal.(float64)
-				if !ok {
-					continue
+			case <-ticker.C:
+				if len(depthBatch) > 0 {
+					processDepthBatch(depthBatch, vwapMap, ticksMap, lastPriceMap, exe, store, mw)
+					depthBatch = depthBatch[:0]
 				}
-				if price == 0 {
-					continue // Skip if no price data yet
-				}
-
-				vwap, std := vwapMap[d.Symbol].CalcWithMetrics(mw)
-				if std == 0 {
-					continue
-				}
-
-				// Increment VWAP calculation metric
-				m.VWAPCalculations.Inc()
-
-				tickRatio := ticksMap[d.Symbol].Ratio()
-				depthRatio := features.DepthImbWithMetrics(d.BidVol, d.AskVol, mw)
-				exe.Try(d.Symbol, price, vwap, std, tickRatio, depthRatio, d.BidVol, d.AskVol)
-
-				// Store depth data if storage is available
-				if store != nil {
-					store.StoreDepth(d)
-				}
-
-				// Update metrics
-				m.DepthsReceived.Inc()
 			}
 		}
 	}()
 
-	// Trade handler goroutine
+	// Trade handler goroutine with batch processing
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		batchSize := 20
+		tradeBatch := make([]bitunix.Trade, 0, batchSize)
+		ticker := time.NewTicker(1 * time.Millisecond) // Process every 1ms
+		defer ticker.Stop()
+
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case t := <-trades:
-				vwapMap[t.Symbol].Add(t.Price, t.Qty)
-
-				// Thread-safe price update
-				priceVal, _ := lastPriceMap.Load(t.Symbol)
-				var oldPrice float64
-				if priceVal != nil {
-					if p, ok := priceVal.(float64); ok {
-						oldPrice = p
-					}
+				tradeBatch = append(tradeBatch, t)
+				if len(tradeBatch) >= batchSize {
+					processTradeBatch(tradeBatch, vwapMap, ticksMap, lastPriceMap, store, mw)
+					tradeBatch = tradeBatch[:0]
 				}
-
-				sign := int8(0)
-				if t.Price > oldPrice {
-					sign = 1
-				} else if t.Price < oldPrice {
-					sign = -1
+			case <-ticker.C:
+				if len(tradeBatch) > 0 {
+					processTradeBatch(tradeBatch, vwapMap, ticksMap, lastPriceMap, store, mw)
+					tradeBatch = tradeBatch[:0]
 				}
-				ticksMap[t.Symbol].Add(sign)
-				lastPriceMap.Store(t.Symbol, t.Price)
-
-				// Store trade data if storage is available
-				if store != nil {
-					store.StoreTrade(t)
-				}
-
-				// Update metrics
-				m.TradesReceived.Inc()
 			}
 		}
 	}()
@@ -262,5 +249,69 @@ func main() {
 		log.Info().Msg("all goroutines stopped")
 	case <-time.After(10 * time.Second):
 		log.Warn().Msg("shutdown timeout, forcing exit")
+	}
+}
+
+// Helper functions for batch processing
+func processDepthBatch(batch []bitunix.Depth, vwapMap map[string]*features.FastVWAP,
+	ticksMap map[string]*features.TickImb, lastPriceMap sync.Map,
+	exe *exec.Exec, store *storage.Store, m *metrics.MetricsWrapper,
+) {
+	for _, d := range batch {
+		priceVal, ok := lastPriceMap.Load(d.Symbol)
+		if !ok {
+			continue
+		}
+		price, ok := priceVal.(float64)
+		if !ok || price == 0 {
+			continue
+		}
+
+		vwap, std := vwapMap[d.Symbol].CalcWithMetrics(m)
+		if std == 0 {
+			continue
+		}
+
+		tickRatio := ticksMap[d.Symbol].Ratio()
+		depthRatio := features.DepthImbWithMetrics(d.BidVol, d.AskVol, m)
+		exe.Try(d.Symbol, price, vwap, std, tickRatio, depthRatio, d.BidVol, d.AskVol)
+
+		if store != nil {
+			store.StoreDepth(d)
+		}
+
+		m.FeatureSampleCount(1)
+	}
+}
+
+func processTradeBatch(batch []bitunix.Trade, vwapMap map[string]*features.FastVWAP,
+	ticksMap map[string]*features.TickImb, lastPriceMap sync.Map,
+	store *storage.Store, m *metrics.MetricsWrapper,
+) {
+	for _, t := range batch {
+		vwapMap[t.Symbol].Add(t.Price, t.Qty)
+
+		priceVal, _ := lastPriceMap.Load(t.Symbol)
+		var oldPrice float64
+		if priceVal != nil {
+			if p, ok := priceVal.(float64); ok {
+				oldPrice = p
+			}
+		}
+
+		sign := int8(0)
+		if t.Price > oldPrice {
+			sign = 1
+		} else if t.Price < oldPrice {
+			sign = -1
+		}
+		ticksMap[t.Symbol].Add(sign)
+		lastPriceMap.Store(t.Symbol, t.Price)
+
+		if store != nil {
+			store.StoreTrade(t)
+		}
+
+		m.FeatureSampleCount(1)
 	}
 }

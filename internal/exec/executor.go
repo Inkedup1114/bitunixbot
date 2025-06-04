@@ -1,15 +1,16 @@
 package exec
 
 import (
+	"math"
+	"strconv"
+	"sync"
+	"time"
+
 	"bitunix-bot/internal/cfg"
 	"bitunix-bot/internal/exchange/bitunix"
 	"bitunix-bot/internal/metrics"
 	"bitunix-bot/internal/ml"
 	"bitunix-bot/internal/storage"
-	"math"
-	"strconv"
-	"sync"
-	"time"
 
 	"github.com/rs/zerolog/log"
 )
@@ -116,7 +117,7 @@ func (e *Exec) Try(symbol string, price, vwap, std, tick, depth float64, bidVol,
 		Symbol:    symbol,
 		Side:      side,
 		TradeSide: "OPEN",
-		Qty:       e.Size(symbol, price),
+		Qty:       strconv.FormatFloat(e.Size(symbol, price), 'f', -1, 64),
 		OrderType: "MARKET",
 	}
 

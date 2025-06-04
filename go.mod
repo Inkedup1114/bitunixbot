@@ -7,6 +7,7 @@ toolchain go1.24.2
 require (
 	github.com/go-resty/resty/v2 v2.12.0
 	github.com/gorilla/websocket v1.5.1
+	github.com/joho/godotenv v1.5.1
 	github.com/prometheus/client_golang v1.20.4
 	github.com/rs/zerolog v1.34.0
 	go.etcd.io/bbolt v1.3.8
@@ -16,7 +17,6 @@ require (
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/joho/godotenv v1.5.1 // indirect
 	github.com/klauspost/compress v1.17.9 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect

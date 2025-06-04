@@ -1,4 +1,77 @@
 {
+    "go.useLanguageServer": true,
+    "go.languageServerExperimentalFeatures": {
+        "diagnostics": true
+    },
+    "go.lintTool": "golangci-lint",
+    "go.lintFlags": [
+        "--fast"
+    ],
+    "go.buildFlags": [
+        "-tags=integration"
+    ],
+    "go.testFlags": [
+        "-v",
+        "-count=1"
+    ],
+    "go.coverageDecorator": {
+        "type": "highlight",
+        "coveredHighlightColor": "rgba(64,128,128,0.5)",
+        "uncoveredHighlightColor": "rgba(128,64,64,0.25)"
+    },
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+        "source.organizeImports": true
+    },
+    "files.autoSave": "afterDelay",
+    "files.autoSaveDelay": 1000,
+    "files.exclude": {
+        "**/.git": true,
+        "**/coverage.out": true,
+        "**/main": true,
+        "**/collect_data": true,
+        "**/generate_data": true
+    },
+    "search.exclude": {
+        "**/vendor": true,
+        "**/node_modules": true,
+        "**/bower_components": true,
+        "**/*.code-search": true
+    },
+    "files.watcherExclude": {
+        "**/.git/objects/**": true,
+        "**/.git/subtree-cache/**": true,
+        "**/node_modules/**": true,
+        "**/vendor/**": true,
+        "**/data/**": true,
+        "**/models/**": true
+    },
+    "go.toolsManagement.checkForUpdates": "local",
+    "go.toolsManagement.autoUpdate": true,
+    "go.coverOnSave": false,
+    "go.testOnSave": false,
+    "go.buildOnSave": "workspace",
+    "go.vetOnSave": "workspace",
+    "go.lintOnSave": "workspace",
+    "go.useLanguageServer": true,
+    "gopls": {
+        "ui.semanticTokens": true,
+        "ui.codelenses": {
+            "gc_details": false,
+            "regenerate_cgo": false,
+            "generate": true,
+            "tidy": true,
+            "upgrade_dependency": true,
+            "vendor": true
+        },
+        "formatting.gofumpt": true,
+        "ui.documentation.hoverKind": "FullDocumentation",
+        "ui.completion.usePlaceholders": true,
+        "ui.completion.completeFunctionCalls": true
+    },
+    "files.associations": {
+        "*.env": "properties"
+    },
     "cSpell.words": [
         "BITUNIX",
         "BTCUSDT",

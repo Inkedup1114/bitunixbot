@@ -29,6 +29,9 @@ type Settings struct {
 	MetricsPort      int
 	MaxPositionSize  float64
 	MaxPriceDistance float64
+	Leverage         int
+	MarginMode       string
+	RiskUSD          float64
 	SymbolConfigs    map[string]SymbolConfig
 	RESTTimeout      time.Duration
 	InitialBalance   float64 `env:"INITIAL_BALANCE" envDefault:"10000"`
@@ -145,6 +148,9 @@ func loadFromYAML(path string) (Settings, error) {
 		MetricsPort:      getIntFromEnvOrConfig("METRICS_PORT", config.System.MetricsPort),
 		MaxPositionSize:  getFloatFromEnvOrConfig("MAX_POSITION_SIZE", config.Trading.MaxPositionSize),
 		MaxPriceDistance: getFloatFromEnvOrConfig("MAX_PRICE_DISTANCE", config.Trading.MaxPriceDistance),
+		Leverage:         getIntOrDefault("LEVERAGE", 20),
+		MarginMode:       getEnvOrDefault("MARGIN_MODE", "ISOLATION"),
+		RiskUSD:          getFloatOrDefault("RISK_USD", 25.0),
 		SymbolConfigs:    config.SymbolConfig,
 		RESTTimeout:      restTimeout,
 	}
@@ -187,6 +193,9 @@ func loadFromEnv() (Settings, error) {
 		MetricsPort:      getIntOrDefault("METRICS_PORT", 8080),
 		MaxPositionSize:  getFloatOrDefault("MAX_POSITION_SIZE", 0.01), // 1% max position
 		MaxPriceDistance: getFloatOrDefault("MAX_PRICE_DISTANCE", 3.0), // 3 std devs
+		Leverage:         getIntOrDefault("LEVERAGE", 20),
+		MarginMode:       getEnvOrDefault("MARGIN_MODE", "ISOLATION"),
+		RiskUSD:          getFloatOrDefault("RISK_USD", 25.0),
 		SymbolConfigs:    make(map[string]SymbolConfig),
 		RESTTimeout:      getDurationOrDefault("REST_TIMEOUT", 5*time.Second),
 	}
@@ -315,75 +324,62 @@ func getBoolFromEnvOrConfig(key string, configValue bool) bool {
 }
 
 // validateSettings performs comprehensive validation of configuration values
-func validateSettings(settings *Settings) error {
+func validateSettings(s *Settings) error {
 	// Validate API credentials
-	if settings.Key == "" || settings.Secret == "" {
-		return fmt.Errorf("API key and secret are required")
+	if s.Key == "" {
+		return fmt.Errorf("API key is required")
+	}
+	if s.Secret == "" {
+		return fmt.Errorf("API secret is required")
 	}
 
-	// Validate symbols
-	if len(settings.Symbols) == 0 {
-		return fmt.Errorf("at least one trading symbol must be specified")
+	// Validate trading parameters
+	if len(s.Symbols) == 0 {
+		return fmt.Errorf("at least one trading symbol is required")
+	}
+	if s.BaseSizeRatio <= 0 || s.BaseSizeRatio > 1 {
+		return fmt.Errorf("baseSizeRatio must be between 0 and 1")
+	}
+	if s.MaxPositionSize <= 0 || s.MaxPositionSize > 1 {
+		return fmt.Errorf("maxPositionSize must be between 0 and 1")
+	}
+	if s.MaxDailyLoss <= 0 || s.MaxDailyLoss > 1 {
+		return fmt.Errorf("maxDailyLoss must be between 0 and 1")
+	}
+	if s.MaxPriceDistance <= 0 {
+		return fmt.Errorf("maxPriceDistance must be positive")
 	}
 
-	// Validate URLs
-	if settings.BaseURL == "" {
-		return fmt.Errorf("base URL cannot be empty")
-	}
-	if settings.WsURL == "" {
-		return fmt.Errorf("WebSocket URL cannot be empty")
-	}
-
-	// Validate time durations
-	if settings.Ping < time.Second || settings.Ping > 5*time.Minute {
-		return fmt.Errorf("ping interval must be between 1s and 5m, got %v", settings.Ping)
-	}
-	if settings.VWAPWindow < time.Second || settings.VWAPWindow > time.Hour {
-		return fmt.Errorf("VWAP window must be between 1s and 1h, got %v", settings.VWAPWindow)
-	}
-	if settings.RESTTimeout < time.Second || settings.RESTTimeout > time.Minute {
-		return fmt.Errorf("REST timeout must be between 1s and 1m, got %v", settings.RESTTimeout)
-	}
-
-	// Validate integer values
-	if settings.VWAPSize < 10 || settings.VWAPSize > 10000 {
-		return fmt.Errorf("VWAP size must be between 10 and 10000, got %d", settings.VWAPSize)
-	}
-	if settings.TickSize < 10 || settings.TickSize > 1000 {
-		return fmt.Errorf("tick size must be between 10 and 1000, got %d", settings.TickSize)
-	}
-	if settings.MetricsPort < 1024 || settings.MetricsPort > 65535 {
-		return fmt.Errorf("metrics port must be between 1024 and 65535, got %d", settings.MetricsPort)
-	}
-
-	// Validate float values - trading parameters
-	if settings.BaseSizeRatio <= 0 || settings.BaseSizeRatio > 0.1 {
-		return fmt.Errorf("base size ratio must be between 0 and 0.1, got %f", settings.BaseSizeRatio)
-	}
-	if settings.ProbThreshold < 0.5 || settings.ProbThreshold >= 1.0 {
-		return fmt.Errorf("probability threshold must be between 0.5 and 0.99, got %f", settings.ProbThreshold)
-	}
-	if settings.MaxDailyLoss < 0 || settings.MaxDailyLoss > 0.5 {
-		return fmt.Errorf("max daily loss must be between 0 and 0.5, got %f", settings.MaxDailyLoss)
-	}
-	if settings.MaxPositionSize <= 0 || settings.MaxPositionSize > 1.0 {
-		return fmt.Errorf("max position size must be between 0 and 1.0, got %f", settings.MaxPositionSize)
-	}
-	if settings.MaxPriceDistance <= 0 || settings.MaxPriceDistance > 10.0 {
-		return fmt.Errorf("max price distance must be between 0 and 10.0, got %f", settings.MaxPriceDistance)
-	}
-
-	// Validate symbol-specific configs
-	for symbol, config := range settings.SymbolConfigs {
-		if config.BaseSizeRatio <= 0 || config.BaseSizeRatio > 0.1 {
-			return fmt.Errorf("symbol %s: base size ratio must be between 0 and 0.1, got %f", symbol, config.BaseSizeRatio)
+	// Additional safeguards for live trading
+	if !s.DryRun {
+		// Check for explicit environment variable override
+		if os.Getenv("FORCE_LIVE_TRADING") != "true" {
+			return fmt.Errorf("live trading requires FORCE_LIVE_TRADING=true environment variable")
 		}
-		if config.MaxPositionSize <= 0 || config.MaxPositionSize > 1.0 {
-			return fmt.Errorf("symbol %s: max position size must be between 0 and 1.0, got %f", symbol, config.MaxPositionSize)
+
+		// Additional validation for live trading
+		if s.MaxPositionSize > 0.1 {
+			return fmt.Errorf("maxPositionSize too high for live trading (max 10%%)")
 		}
-		if config.MaxPriceDistance <= 0 || config.MaxPriceDistance > 10.0 {
-			return fmt.Errorf("symbol %s: max price distance must be between 0 and 10.0, got %f", symbol, config.MaxPriceDistance)
+		if s.MaxDailyLoss > 0.05 {
+			return fmt.Errorf("maxDailyLoss too high for live trading (max 5%%)")
 		}
+	}
+
+	// Validate ML parameters
+	if s.ProbThreshold < 0.5 || s.ProbThreshold > 0.95 {
+		return fmt.Errorf("probThreshold must be between 0.5 and 0.95")
+	}
+
+	// Validate system parameters
+	if s.Ping < 5*time.Second || s.Ping > 60*time.Second {
+		return fmt.Errorf("pingInterval must be between 5s and 60s")
+	}
+	if s.RESTTimeout < 1*time.Second || s.RESTTimeout > 30*time.Second {
+		return fmt.Errorf("restTimeout must be between 1s and 30s")
+	}
+	if s.MetricsPort <= 0 || s.MetricsPort > 65535 {
+		return fmt.Errorf("invalid metricsPort")
 	}
 
 	return nil

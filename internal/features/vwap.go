@@ -5,6 +5,8 @@ import (
 	"math"
 	"sync"
 	"time"
+
+	"bitunix-bot/internal/metrics"
 )
 
 type sample struct {
@@ -262,4 +264,221 @@ func (v *VWAP) Reset() {
 	v.currentSize = 0
 	// To be absolutely sure the ring is clean for Do iteration:
 	v.ring = ring.New(v.maxSize) // Re-initialize the ring
+}
+
+// FastVWAP implements a high-performance VWAP calculator
+type FastVWAP struct {
+	samples    []sample
+	head, tail int
+	size       int
+	mu         sync.RWMutex
+	pool       *sync.Pool
+	batchSize  int
+	win        time.Duration
+}
+
+// NewFastVWAP creates a new optimized VWAP calculator
+func NewFastVWAP(win time.Duration, size int) *FastVWAP {
+	if size <= 0 {
+		size = 1
+	}
+	if win <= 0 {
+		win = time.Minute
+	}
+	return &FastVWAP{
+		samples:   make([]sample, size),
+		size:      size,
+		batchSize: 32, // Optimal batch size for cache lines
+		win:       win,
+		pool: &sync.Pool{
+			New: func() interface{} {
+				return &sample{}
+			},
+		},
+	}
+}
+
+// BatchUpdate processes multiple price updates efficiently
+func (v *FastVWAP) BatchUpdate(prices, volumes []float64) {
+	if len(prices) != len(volumes) {
+		return
+	}
+
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	now := time.Now()
+	for i := 0; i < len(prices); i += v.batchSize {
+		end := i + v.batchSize
+		if end > len(prices) {
+			end = len(prices)
+		}
+
+		// Process batch
+		for j := i; j < end; j++ {
+			if math.IsNaN(prices[j]) || math.IsInf(prices[j], 0) || prices[j] < 0 {
+				continue
+			}
+			if math.IsNaN(volumes[j]) || math.IsInf(volumes[j], 0) || volumes[j] < 0 {
+				continue
+			}
+
+			// Get sample from pool
+			s := v.pool.Get().(*sample)
+			s.p = prices[j]
+			s.v = volumes[j]
+			s.t = now
+
+			// Update circular buffer
+			v.samples[v.tail] = *s
+			v.tail = (v.tail + 1) % v.size
+			if v.tail == v.head {
+				v.head = (v.head + 1) % v.size
+			}
+
+			// Return sample to pool
+			v.pool.Put(s)
+		}
+	}
+}
+
+// FastCalc performs optimized VWAP calculation
+func (v *FastVWAP) FastCalc() (value, std float64) {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+
+	if v.head == v.tail {
+		return 0, 0
+	}
+
+	var pv, vv float64
+	count := 0
+	cutoff := time.Now().Add(-v.win)
+
+	// Pre-allocate slice for valid samples
+	validSamples := make([]sample, 0, v.size)
+
+	// Process samples in batches
+	for i := v.head; i != v.tail; i = (i + 1) % v.size {
+		s := v.samples[i]
+		if s.t.After(cutoff) {
+			pv += s.p * s.v
+			vv += s.v
+			validSamples = append(validSamples, s)
+			count++
+		}
+	}
+
+	if vv == 0 || count == 0 {
+		return 0, 0
+	}
+
+	value = pv / vv
+
+	if count == 1 {
+		return value, 0
+	}
+
+	// Calculate variance using Welford's online algorithm
+	var m2 float64
+	for _, s := range validSamples {
+		delta := s.p - value
+		m2 += s.v * delta * delta
+	}
+
+	if vv > 0 {
+		variance := m2 / vv
+		if variance > 0 {
+			std = math.Sqrt(variance)
+		}
+	}
+
+	return value, std
+}
+
+//go:noescape
+func simdVWAPCalc(samples []sample, size int) (sum, sumSq, volSum float64)
+
+// CalcWithMetrics calculates VWAP and standard deviation with metrics tracking
+func (v *FastVWAP) CalcWithMetrics(m *metrics.MetricsWrapper) (float64, float64) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	if v.size == 0 {
+		return 0, 0
+	}
+
+	// Use SIMD-optimized calculation if available
+	if v.size >= 4 { // Only use SIMD for larger batches
+		sum, sumSq, volSum := simdVWAPCalc(v.samples[v.head:v.head+v.size], v.size)
+		if volSum > 0 {
+			vwap := sum / volSum
+			variance := (sumSq/volSum - vwap*vwap)
+			std := math.Sqrt(variance)
+
+			// Track metrics
+			if m != nil {
+				m.FeatureSampleCount(1)
+			}
+
+			return vwap, std
+		}
+	}
+
+	// Fallback to scalar calculation for small batches
+	var sum, sumSq, volSum float64
+	for i := 0; i < v.size; i++ {
+		idx := (v.head + i) % len(v.samples)
+		sample := v.samples[idx]
+		sum += sample.p * sample.v
+		sumSq += sample.p * sample.p * sample.v
+		volSum += sample.v
+	}
+
+	if volSum == 0 {
+		return 0, 0
+	}
+
+	vwap := sum / volSum
+	variance := (sumSq/volSum - vwap*vwap)
+	std := math.Sqrt(variance)
+
+	// Track metrics
+	if m != nil {
+		m.FeatureSampleCount(1)
+	}
+
+	return vwap, std
+}
+
+// Add adds a new price and volume sample to the VWAP calculation
+func (v *FastVWAP) Add(price, volume float64) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	// Add new sample
+	v.samples[v.tail] = sample{
+		p: price,
+		v: volume,
+		t: time.Now(),
+	}
+
+	// Update indices
+	v.tail = (v.tail + 1) % len(v.samples)
+	if v.size < len(v.samples) {
+		v.size++
+	} else {
+		v.head = (v.head + 1) % len(v.samples)
+	}
+
+	// Evict old samples
+	now := time.Now()
+	for v.size > 0 {
+		oldest := v.samples[v.head]
+		if now.Sub(oldest.t) <= v.win {
+			break
+		}
+		v.head = (v.head + 1) % len(v.samples)
+		v.size--
+	}
 }

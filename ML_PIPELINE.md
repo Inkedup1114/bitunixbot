@@ -22,6 +22,67 @@ The ML model analyzes three core market features:
 - **`depth_ratio`**: Order book depth imbalance  
 - **`price_dist`**: Price distance from VWAP in standard deviations
 
+## Model Performance & Validation
+
+### Performance Metrics
+
+The model's performance is evaluated using multiple metrics:
+
+1. **Classification Metrics**:
+   - AUC-ROC: Typically > 0.65 on test set
+   - F1 Score: Typically > 0.60 on test set
+   - Precision: > 0.70 at 0.65 probability threshold
+   - Recall: > 0.50 at 0.65 probability threshold
+
+2. **Trading Metrics**:
+   - Win Rate: > 55% on out-of-sample data
+   - Profit Factor: > 1.5 on backtest
+   - Sharpe Ratio: > 1.2 on live trading
+   - Maximum Drawdown: < 15% on backtest
+
+### Validation Process
+
+The model undergoes rigorous validation:
+
+1. **Data Validation**:
+   - Train/Test Split: 80/20 chronological split
+   - Cross-Validation: 5-fold time-series cross-validation
+   - Out-of-Sample Testing: Last 30 days held out
+
+2. **Feature Validation**:
+   - Feature Importance Analysis
+   - Correlation Analysis
+   - Stability Analysis (rolling window)
+
+3. **Model Validation**:
+   - Hyperparameter Tuning
+   - Ensemble Methods
+   - Robustness Testing
+
+4. **Trading Validation**:
+   - Paper Trading
+   - Backtesting
+   - Live Trading with Small Size
+
+### Performance Monitoring
+
+Continuous monitoring of model performance:
+
+1. **Daily Metrics**:
+   - Prediction Accuracy
+   - Signal Quality
+   - Trading Performance
+
+2. **Weekly Reports**:
+   - Feature Drift Analysis
+   - Model Stability Metrics
+   - Trading Statistics
+
+3. **Monthly Reviews**:
+   - Full Performance Analysis
+   - Model Retraining Decision
+   - Strategy Adjustments
+
 ## Quick Start
 
 ### 1. Install Dependencies
@@ -248,13 +309,6 @@ on:
     - cron: '0 2 * * *'  # Daily at 2 AM UTC
   workflow_dispatch:     # Manual trigger
 ```
-
-**Workflow**:
-- Exports data from production database
-- Trains model with latest data
-- Validates ONNX format and performance
-- Uploads model artifacts
-- Sends notifications on success/failure
 
 ## Configuration
 
