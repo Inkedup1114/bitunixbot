@@ -21,9 +21,11 @@ type MetricsHistogram interface {
 }
 
 // Legacy interfaces for compatibility
-type Counter = MetricsCounter
-type Gauge = MetricsGauge
-type Histogram = MetricsHistogram
+type (
+	Counter   = MetricsCounter
+	Gauge     = MetricsGauge
+	Histogram = MetricsHistogram
+)
 
 // MetricsWrapper provides a simple interface for executor to use metrics
 type MetricsWrapper struct {
@@ -88,6 +90,19 @@ func (w *MetricsWrapper) MLFallbackUseInc() {
 	w.m.MLFallbackUse.Inc()
 }
 
+// Order execution timeout metrics methods
+func (w *MetricsWrapper) OrderTimeoutsInc() {
+	w.m.OrderTimeouts.Inc()
+}
+
+func (w *MetricsWrapper) OrderRetriesInc() {
+	w.m.OrderRetries.Inc()
+}
+
+func (w *MetricsWrapper) OrderExecutionDurationObserve(v float64) {
+	w.m.OrderExecutionDuration.Observe(v)
+}
+
 // Feature calculation duration tracking
 func (w *MetricsWrapper) FeatureCalcDuration(duration time.Duration) {
 	// Convert duration to seconds and observe it as ML latency
@@ -99,6 +114,11 @@ func (w *MetricsWrapper) FeatureSampleCount(count int) {
 	// Could add a specific metric for sample counts if needed
 	// For now, we'll track it as a gauge
 	w.m.VWAPCalculations.Inc()
+}
+
+// GetErrorRate exposes the error rate calculation method
+func (w *MetricsWrapper) GetErrorRate() float64 {
+	return w.m.GetErrorRate()
 }
 
 type CounterWrapper struct {

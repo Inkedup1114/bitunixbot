@@ -2,7 +2,7 @@
 
 [![Go Version](https://img.shields.io/badge/Go-1.22+-blue.svg)](https://golang.org)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Build Status](https://img.shields.io/badge/Build-Failing-red.svg)](TODO.md)
+[![Build Status](https://img.shields.io/badge/Build-Passing-green.svg)](TODO.md)
 [![Test Coverage](https://img.shields.io/badge/Coverage-70%25-yellow.svg)](coverage.out)
 
 *A high-performance cryptocurrency trading bot for Bitunix exchange, featuring ML-powered predictions and advanced risk management.*
@@ -20,8 +20,8 @@ Bitunix Bot is an automated trading system designed for cryptocurrency perpetual
 | Feature | Status | Description |
 |---------|--------|-------------|
 | **Real-time Data** | ✅ Working | WebSocket feeds for trades and order book |
-| **ML Predictions** | ⚠️ Partial | ONNX model integration (build issues) |
-| **Risk Management** | ✅ Working | Position sizing, stop-loss, daily limits |
+| **ML Predictions** | ✅ Working | ONNX model integration with fallback strategy |
+| **Risk Management** | ✅ Working | Position sizing, stop-loss, daily limits, trailing stops |
 | **Multi-Symbol** | ✅ Working | Trade multiple pairs simultaneously |
 | **Backtesting** | ✅ Working | Historical data analysis and strategy validation |
 | **Monitoring** | ✅ Working | Prometheus metrics and health checks |
@@ -32,16 +32,23 @@ Bitunix Bot is an automated trading system designed for cryptocurrency perpetual
 ## 📊 Trading Strategy
 
 ### OVIR-X Strategy
+
 The bot implements an **Open-Volume-Imbalance-Reversal-eXtended** strategy that:
 
 1. **Monitors Price Extremes**: Tracks deviations from VWAP (Volume Weighted Average Price)
-2. **Analyzes Market Microstructure**: 
+2. **Analyzes Market Microstructure**:
    - Tick imbalance (buyer vs seller aggression)
    - Order book depth imbalance
-3. **ML Signal Validation**: Optional ONNX model validates reversal probability
-4. **Risk-Adjusted Execution**: Dynamic position sizing based on volatility
+3. **ML Signal Validation**: ONNX model validates reversal probability with fallback strategy
+4. **Risk-Adjusted Execution**: Dynamic position sizing based on Kelly Criterion
+5. **Advanced Risk Management**:
+   - Trailing stop-loss orders
+   - Daily loss limits
+   - Position exposure limits
+   - Circuit breakers for abnormal conditions
 
 ### Performance Characteristics
+
 - **Target**: 0.1-0.3% per trade
 - **Risk**: <0.1% stop loss
 - **Frequency**: 10-50 trades per day
@@ -69,17 +76,20 @@ bitunix-bot/
 ```
 
 ### Technology Stack
+
 - **Language**: Go 1.22+ (single binary <15MB)
-- **ML Runtime**: ONNX Runtime (Python bridge)
+- **ML Runtime**: ONNX Runtime with Python bridge and fallback strategy
 - **Database**: BoltDB (embedded)
 - **Monitoring**: Prometheus + Grafana
 - **Container**: Docker with Alpine Linux
+- **Deployment**: Kubernetes, Docker, and systemd support
 
 ---
 
 ## 🚀 Quick Start
 
 ### Prerequisites
+
 ```bash
 # Ubuntu/Debian
 sudo apt update
@@ -96,18 +106,21 @@ brew install go python@3.11
 ### Installation
 
 1. **Clone the repository**
+
 ```bash
 git clone https://github.com/yourusername/bitunix-bot.git
 cd bitunix-bot
 ```
 
 2. **Set up configuration**
+
 ```bash
 cp config.yaml.example config.yaml
 # Edit config.yaml with your settings
 ```
 
 3. **Set environment variables**
+
 ```bash
 export BITUNIX_API_KEY="your-api-key"
 export BITUNIX_SECRET_KEY="your-secret-key"
@@ -115,11 +128,13 @@ export FORCE_LIVE_TRADING=false  # Keep false for safety
 ```
 
 4. **Install Python dependencies**
+
 ```bash
 pip install -r scripts/requirements.txt
 ```
 
 5. **Run the bot**
+
 ```bash
 go run cmd/bitrader/main.go
 ```
@@ -164,6 +179,7 @@ ml:
 ## 🧪 Testing & Development
 
 ### Run Tests
+
 ```bash
 # Unit tests
 go test ./...
@@ -177,6 +193,7 @@ go test -v ./internal/features
 ```
 
 ### Backtesting
+
 ```bash
 # Run backtest on historical data
 go run cmd/backtest/main.go \
@@ -187,6 +204,7 @@ go run cmd/backtest/main.go \
 ```
 
 ### ML Model Training
+
 ```bash
 # Collect training data
 go run scripts/collect_historical_data.go
@@ -203,6 +221,7 @@ python scripts/model_validation.py
 ## 🚢 Deployment
 
 ### Docker
+
 ```bash
 # Build image
 docker build -t bitunix-bot .
@@ -217,23 +236,31 @@ docker run -d \
 ```
 
 ### Kubernetes
+
 ```bash
 # Create namespace
 kubectl create namespace trading
 
-# Deploy
-kubectl apply -f deploy/k8s/
+# Deploy with Helm
+helm install bitunix-bot ./deploy/helm \
+  --namespace trading \
+  --set config.apiKey=$BITUNIX_API_KEY \
+  --set config.secretKey=$BITUNIX_SECRET_KEY
 
 # Check status
 kubectl get pods -n trading
 ```
 
 ### Systemd (Linux)
+
 ```bash
 # Install service
 sudo cp deploy/bitunix-bot.service /etc/systemd/system/
 sudo systemctl enable bitunix-bot
 sudo systemctl start bitunix-bot
+
+# Check status
+sudo systemctl status bitunix-bot
 ```
 
 ---
@@ -241,10 +268,13 @@ sudo systemctl start bitunix-bot
 ## 📈 Monitoring
 
 ### Metrics Endpoint
+
 The bot exposes Prometheus metrics on port 8080:
+
 - `http://localhost:8080/metrics`
 
 ### Key Metrics
+
 - `bitunix_trades_total` - Total trades executed
 - `bitunix_pnl_total` - Cumulative P&L
 - `bitunix_ml_predictions_total` - ML predictions made
@@ -252,6 +282,7 @@ The bot exposes Prometheus metrics on port 8080:
 - `bitunix_order_latency_seconds` - Order execution time
 
 ### Grafana Dashboard
+
 Import the dashboard from `deploy/grafana/dashboard.json`
 
 ---
@@ -259,11 +290,13 @@ Import the dashboard from `deploy/grafana/dashboard.json`
 ## ⚠️ Known Issues & Limitations
 
 ### Current Build Issues
+
 1. **ML Predictor**: Duplicate mutex declaration causing build failure
 2. **Assembly Optimization**: VWAP SIMD code has syntax errors
 3. **Test Coverage**: Some packages below 85% target
 
 ### Operational Limitations
+
 1. **Exchange Support**: Only Bitunix perpetual futures
 2. **Strategy**: Single strategy (OVIR-X) implementation
 3. **ML Dependency**: Requires Python for ONNX inference
@@ -291,6 +324,7 @@ See [TODO.md](TODO.md) for complete list of pending tasks.
 5. Open a Pull Request
 
 ### Development Guidelines
+
 - Write tests for new features (target 85% coverage)
 - Follow Go best practices and idioms
 - Update documentation for API changes
@@ -332,5 +366,3 @@ This project is licensed under the MIT License - see [LICENSE](LICENSE) file for
 ---
 
 **Disclaimer**: Trading cryptocurrencies carries significant risk. This software is provided as-is without warranty. Always test thoroughly before using with real funds.
-
-

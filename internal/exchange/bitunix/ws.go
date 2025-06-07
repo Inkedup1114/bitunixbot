@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,14 +17,14 @@ import (
 )
 
 const (
-	defaultBufferSize = 1000
-	maxConnections    = 10
-	workerPoolSize    = 5
-	messagePoolSize   = 1000
-	pongTimeout       = 5 * time.Second // Pong timeout threshold
+	defaultBufferSize = 1000            // Default buffer size for channels
+	maxConnections    = 10              // Maximum concurrent WebSocket connections
+	workerPoolSize    = 5               // Number of worker goroutines for message processing
+	messagePoolSize   = 1000            // Size of message object pool
+	pongTimeout       = 5 * time.Second // Pong timeout threshold for connection health
 )
 
-// Object pools for frequently created objects
+// Object pools for frequently created objects to reduce garbage collection pressure
 var (
 	tradePool = sync.Pool{
 		New: func() interface{} {
@@ -41,20 +43,26 @@ var (
 	}
 )
 
+// Trade represents a trade execution from the WebSocket stream.
+// It contains price, quantity, timestamp, and sequence information
+// for real-time trade processing and analysis.
 type Trade struct {
-	Symbol string
-	Price  float64
-	Qty    float64
-	Ts     time.Time
-	Seq    int64
+	Symbol string    // Trading symbol
+	Price  float64   // Execution price
+	Qty    float64   // Execution quantity
+	Ts     time.Time // Execution timestamp
+	Seq    int64     // Sequence number for ordering
 }
 
+// Depth represents order book depth information from the WebSocket stream.
+// It contains bid/ask volume aggregates and last price for market analysis
+// and order book imbalance calculations.
 type Depth struct {
-	Symbol         string
-	BidVol, AskVol float64
-	LastPrice      float64
-	Ts             time.Time
-	Seq            int64
+	Symbol         string    // Trading symbol
+	BidVol, AskVol float64   // Total bid and ask volumes
+	LastPrice      float64   // Last traded price
+	Ts             time.Time // Timestamp of depth update
+	Seq            int64     // Sequence number for ordering
 }
 
 // Lock-free sequence tracking
@@ -100,15 +108,24 @@ type WS struct {
 	isConnected  int32 // atomic bool (0 = false, 1 = true)
 	lastPongTime int64 // atomic unix timestamp
 	lastPingTime int64 // atomic unix timestamp
+
+	// Memory monitoring
+	memStats *MemoryStats
 }
 
 func NewWS(u string) *WS {
-	return &WS{
+	ws := &WS{
 		url:        u,
 		connPool:   make(chan *websocket.Conn, maxConnections),
 		workerPool: make(chan struct{}, workerPoolSize),
 		seqTracker: newSequenceTracker(),
+		memStats:   NewMemoryStats(),
 	}
+
+	// Start memory monitoring
+	ws.memStats.StartMonitoring()
+
+	return ws
 }
 
 // Alive returns true if the WebSocket connection is healthy
@@ -139,12 +156,22 @@ func (w *WS) Alive() bool {
 
 // GetConnectionStats returns connection statistics
 func (w *WS) GetConnectionStats() map[string]interface{} {
-	return map[string]interface{}{
+	stats := map[string]interface{}{
 		"connected":       atomic.LoadInt32(&w.isConnected) == 1,
 		"reconnect_count": atomic.LoadInt32(&w.reconnectCount),
 		"last_pong_time":  atomic.LoadInt64(&w.lastPongTime),
 		"last_ping_time":  atomic.LoadInt64(&w.lastPingTime),
 	}
+
+	// Add memory stats if available
+	if w.memStats != nil {
+		memStats := w.memStats.GetStats()
+		for k, v := range memStats {
+			stats[k] = v
+		}
+	}
+
+	return stats
 }
 
 // Zero-copy message parsing
@@ -188,6 +215,7 @@ func (w *WS) Stream(ctx context.Context, symbols []string, trades chan<- Trade, 
 				select {
 				case <-time.After(backoff):
 				case <-ctx.Done():
+					atomic.StoreInt32(&w.isConnected, 0)
 					return ctx.Err()
 				}
 
@@ -205,7 +233,14 @@ func (w *WS) Stream(ctx context.Context, symbols []string, trades chan<- Trade, 
 }
 
 func (w *WS) streamOnce(ctx context.Context, symbols []string, trades chan<- Trade, depth chan<- Depth, errors chan<- error, ping time.Duration) error {
-	log.Info().Str("url", w.url).Int("symbols_count", len(symbols)).Msg("Establishing WebSocket connection")
+	// Normalize URL by removing trailing slash
+	url := strings.TrimRight(w.url, "/")
+	log.Info().Str("url", url).Int("symbols_count", len(symbols)).Msg("Establishing WebSocket connection")
+
+	// Track connection in memory stats
+	if w.memStats != nil {
+		w.memStats.TrackConnectionActive()
+	}
 
 	// Get connection from pool or create new
 	var conn *websocket.Conn
@@ -214,7 +249,11 @@ func (w *WS) streamOnce(ctx context.Context, symbols []string, trades chan<- Tra
 		// Reuse existing connection
 	default:
 		var err error
-		conn, _, err = websocket.DefaultDialer.DialContext(ctx, w.url, nil)
+		var resp *http.Response
+		conn, resp, err = websocket.DefaultDialer.DialContext(ctx, url, nil)
+		if resp != nil && resp.Body != nil {
+			resp.Body.Close()
+		}
 		if err != nil {
 			return fmt.Errorf("dial failed: %w", err)
 		}
@@ -222,6 +261,10 @@ func (w *WS) streamOnce(ctx context.Context, symbols []string, trades chan<- Tra
 
 	defer func() {
 		atomic.StoreInt32(&w.isConnected, 0)
+		// Track connection closure in memory stats
+		if w.memStats != nil {
+			w.memStats.TrackConnectionClosed()
+		}
 		// Return connection to pool
 		select {
 		case w.connPool <- conn:
@@ -348,17 +391,36 @@ func (w *WS) streamOnce(ctx context.Context, symbols []string, trades chan<- Tra
 			buf = buf[:0]
 			buf = append(buf, msg...)
 
+			// Track message pool usage
+			if w.memStats != nil {
+				w.memStats.TrackMessagePoolGet()
+			}
+
 			// Process message in worker pool
 			select {
 			case w.workerPool <- struct{}{}:
 				go func() {
-					defer func() { <-w.workerPool }()
+					if w.memStats != nil {
+						w.memStats.TrackWorkerActive()
+					}
+
+					defer func() {
+						<-w.workerPool
+						if w.memStats != nil {
+							w.memStats.TrackWorkerInactive()
+							w.memStats.TrackMessagePoolPut()
+						}
+						messagePool.Put(buf)
+					}()
+
 					w.processMessage(buf, trades, depth, errors)
-					messagePool.Put(buf)
 				}()
 			default:
 				// If worker pool is full, process in current goroutine
 				w.processMessage(buf, trades, depth, errors)
+				if w.memStats != nil {
+					w.memStats.TrackMessagePoolPut()
+				}
 				messagePool.Put(buf)
 			}
 		}
@@ -366,6 +428,10 @@ func (w *WS) streamOnce(ctx context.Context, symbols []string, trades chan<- Tra
 }
 
 func (w *WS) processMessage(msg []byte, trades chan<- Trade, depth chan<- Depth, errors chan<- error) {
+	// Track message processing
+	if w.memStats != nil {
+		w.memStats.TrackMessageProcessed(len(msg))
+	}
 	raw, err := parseMessage(msg)
 	if err != nil {
 		log.Debug().Err(err).Str("message", string(msg)).Msg("failed to parse message")
@@ -402,7 +468,7 @@ func (w *WS) processMessage(msg []byte, trades chan<- Trade, depth chan<- Depth,
 	// Process data messages
 	switch raw["ch"] {
 	case "trade":
-		if err := parseTrade(raw, trades, seqNum); err != nil {
+		if err := w.parseTrade(raw, trades, seqNum); err != nil {
 			log.Debug().Err(err).Interface("raw_data", raw).Msg("Failed to parse trade")
 			select {
 			case errors <- fmt.Errorf("parse trade: %w", err):
@@ -410,7 +476,7 @@ func (w *WS) processMessage(msg []byte, trades chan<- Trade, depth chan<- Depth,
 			}
 		}
 	case "depth_books":
-		if err := parseDepth(raw, depth, seqNum); err != nil {
+		if err := w.parseDepth(raw, depth, seqNum); err != nil {
 			log.Debug().Err(err).Interface("raw_data", raw).Msg("Failed to parse depth")
 			select {
 			case errors <- fmt.Errorf("parse depth: %w", err):
@@ -420,7 +486,7 @@ func (w *WS) processMessage(msg []byte, trades chan<- Trade, depth chan<- Depth,
 	}
 }
 
-func parseTrade(m map[string]any, out chan<- Trade, seqNum int64) error {
+func (w *WS) parseTrade(m map[string]any, out chan<- Trade, seqNum int64) error {
 	data, ok := m["data"].([]any)
 	if !ok || len(data) == 0 {
 		return fmt.Errorf("invalid trade data format")
@@ -474,6 +540,9 @@ func parseTrade(m map[string]any, out chan<- Trade, seqNum int64) error {
 
 	// Get trade object from pool
 	trade := tradePool.Get().(*Trade)
+	if w.memStats != nil {
+		w.memStats.TrackTradePoolGet()
+	}
 	trade.Symbol = symbol
 	trade.Price = price
 	trade.Qty = qty
@@ -489,15 +558,21 @@ func parseTrade(m map[string]any, out chan<- Trade, seqNum int64) error {
 			Msg("Trade processed successfully")
 	default:
 		log.Warn().Str("symbol", symbol).Msg("trade channel full, dropping message")
+		if w.memStats != nil {
+			w.memStats.TrackMessageDropped()
+		}
 	}
 
 	// Return trade object to pool
 	tradePool.Put(trade)
+	if w.memStats != nil {
+		w.memStats.TrackTradePoolPut()
+	}
 
 	return nil
 }
 
-func parseDepth(m map[string]any, out chan<- Depth, seqNum int64) error {
+func (w *WS) parseDepth(m map[string]any, out chan<- Depth, seqNum int64) error {
 	data, ok := m["data"].(map[string]any)
 	if !ok {
 		return fmt.Errorf("invalid depth data format")
@@ -583,6 +658,9 @@ func parseDepth(m map[string]any, out chan<- Depth, seqNum int64) error {
 
 	// Get depth object from pool
 	depth := depthPool.Get().(*Depth)
+	if w.memStats != nil {
+		w.memStats.TrackDepthPoolGet()
+	}
 	depth.Symbol = symbol
 	depth.BidVol = bidVol
 	depth.AskVol = askVol
@@ -602,10 +680,16 @@ func parseDepth(m map[string]any, out chan<- Depth, seqNum int64) error {
 			Msg("Depth processed successfully")
 	default:
 		log.Warn().Str("symbol", symbol).Msg("depth channel full, dropping message")
+		if w.memStats != nil {
+			w.memStats.TrackMessageDropped()
+		}
 	}
 
 	// Return depth object to pool
 	depthPool.Put(depth)
+	if w.memStats != nil {
+		w.memStats.TrackDepthPoolPut()
+	}
 
 	return nil
 }

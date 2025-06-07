@@ -19,6 +19,7 @@ func TestLoadFromEnv(t *testing.T) {
 			envVars: map[string]string{
 				"BITUNIX_API_KEY":    "test_key",
 				"BITUNIX_SECRET_KEY": "test_secret",
+				"FORCE_LIVE_TRADING": "true",
 			},
 			wantErr: false,
 			validate: func(t *testing.T, settings Settings) {
@@ -55,6 +56,7 @@ func TestLoadFromEnv(t *testing.T) {
 				"METRICS_PORT":       "9090",
 				"MAX_POSITION_SIZE":  "0.02",
 				"MAX_PRICE_DISTANCE": "2.5",
+				"FORCE_LIVE_TRADING": "true",
 			},
 			wantErr: false,
 			validate: func(t *testing.T, settings Settings) {
@@ -274,7 +276,7 @@ trading:
 			// Create temporary YAML file
 			tmpDir := t.TempDir()
 			configPath := filepath.Join(tmpDir, "config.yaml")
-			err := os.WriteFile(configPath, []byte(tt.yamlContent), 0644)
+			err := os.WriteFile(configPath, []byte(tt.yamlContent), 0o644)
 			if err != nil {
 				t.Fatalf("failed to write test config file: %v", err)
 			}
@@ -366,7 +368,7 @@ system:
 			if tt.configFile != "" && tt.yamlContent != "" {
 				tmpDir := t.TempDir()
 				configPath := filepath.Join(tmpDir, tt.configFile)
-				err := os.WriteFile(configPath, []byte(tt.yamlContent), 0644)
+				err := os.WriteFile(configPath, []byte(tt.yamlContent), 0o644)
 				if err != nil {
 					t.Fatalf("failed to write test config file: %v", err)
 				}

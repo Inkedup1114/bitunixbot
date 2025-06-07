@@ -5,26 +5,38 @@ import (
 	"time"
 )
 
-func TestValidateSettings_ValidConfig(t *testing.T) {
-	settings := &Settings{
-		Key:              "valid_key",
-		Secret:           "valid_secret",
-		Symbols:          []string{"BTCUSDT", "ETHUSDT"},
-		BaseURL:          "https://api.bitunix.com",
-		WsURL:            "wss://fapi.bitunix.com/public",
-		Ping:             30 * time.Second,
-		VWAPWindow:       30 * time.Second,
-		RESTTimeout:      10 * time.Second,
-		VWAPSize:         500,
-		TickSize:         50,
-		MetricsPort:      9090,
-		BaseSizeRatio:    0.002,
-		ProbThreshold:    0.65,
-		MaxDailyLoss:     0.05,
-		MaxPositionSize:  0.01,
-		MaxPriceDistance: 2.5,
-		SymbolConfigs:    make(map[string]SymbolConfig),
+// createValidSettings creates a valid Settings struct for testing
+func createValidSettings() *Settings {
+	return &Settings{
+		Key:                        "valid_key",
+		Secret:                     "valid_secret",
+		Symbols:                    []string{"BTCUSDT", "ETHUSDT"},
+		BaseURL:                    "https://api.bitunix.com",
+		WsURL:                      "wss://fapi.bitunix.com/public",
+		Ping:                       30 * time.Second,
+		VWAPWindow:                 30 * time.Second,
+		RESTTimeout:                10 * time.Second,
+		VWAPSize:                   500,
+		TickSize:                   50,
+		MetricsPort:                9090,
+		BaseSizeRatio:              0.002,
+		ProbThreshold:              0.65,
+		MaxDailyLoss:               0.05,
+		MaxPositionSize:            0.01,
+		MaxPositionExposure:        0.1,
+		MaxPriceDistance:           2.5,
+		SymbolConfigs:              make(map[string]SymbolConfig),
+		DryRun:                     true, // Set to true to avoid FORCE_LIVE_TRADING requirement
+		CircuitBreakerVolatility:   2.0,
+		CircuitBreakerImbalance:    0.8,
+		CircuitBreakerVolume:       5.0,
+		CircuitBreakerErrorRate:    0.2,
+		CircuitBreakerRecoveryTime: 5 * time.Minute,
 	}
+}
+
+func TestValidateSettings_ValidConfig(t *testing.T) {
+	settings := createValidSettings()
 
 	err := validateSettings(settings)
 	if err != nil {
@@ -178,24 +190,8 @@ func TestValidateSettings_InvalidPingInterval(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			settings := &Settings{
-				Key:              "valid_key",
-				Secret:           "valid_secret",
-				Symbols:          []string{"BTCUSDT"},
-				BaseURL:          "https://api.bitunix.com",
-				WsURL:            "wss://fapi.bitunix.com/public",
-				Ping:             tc.ping,
-				VWAPWindow:       30 * time.Second,
-				RESTTimeout:      10 * time.Second,
-				VWAPSize:         500,
-				TickSize:         50,
-				MetricsPort:      9090,
-				BaseSizeRatio:    0.002,
-				ProbThreshold:    0.65,
-				MaxDailyLoss:     0.05,
-				MaxPositionSize:  0.01,
-				MaxPriceDistance: 2.5,
-			}
+			settings := createValidSettings()
+			settings.Ping = tc.ping
 
 			err := validateSettings(settings)
 			if tc.wantErr && err == nil {

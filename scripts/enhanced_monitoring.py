@@ -105,15 +105,15 @@ class PrometheusClient:
             return None
 
 class MetricsCollector:
-    """Collects and processes metrics from various sources."""
+    """Collects metrics from bot and system."""
     
     def __init__(self, metrics_url: str = "http://localhost:8080/metrics"):
         self.metrics_url = metrics_url
         self.session = requests.Session()
-        self.session.timeout = 10
+        self.session.timeout = 30
     
     def collect_bot_metrics(self) -> List[MetricValue]:
-        """Collect metrics from bot metrics endpoint."""
+        """Collect metrics from bot's Prometheus endpoint."""
         try:
             response = self.session.get(self.metrics_url)
             response.raise_for_status()
@@ -124,13 +124,12 @@ class MetricsCollector:
                     metric = MetricValue(
                         name=sample.name,
                         value=sample.value,
-                        labels=dict(sample.labels),
-                        timestamp=datetime.now(),
-                        help_text=family.documentation
+                        labels=sample.labels,
+                        timestamp=datetime.now()
                     )
                     metrics.append(metric)
             
-            logger.info(f"Collected {len(metrics)} metrics from bot")
+            logger.info(f"Collected {len(metrics)} bot metrics")
             return metrics
             
         except Exception as e:
@@ -138,43 +137,56 @@ class MetricsCollector:
             return []
     
     def collect_system_metrics(self) -> List[MetricValue]:
-        """Collect system-level metrics."""
-        metrics = []
-        timestamp = datetime.now()
-        
+        """Collect system metrics using psutil."""
         try:
-            # CPU usage
-            cpu_usage = self._get_cpu_usage()
-            if cpu_usage is not None:
-                metrics.append(MetricValue(
-                    name="system_cpu_usage_percent",
-                    value=cpu_usage,
-                    labels={},
-                    timestamp=timestamp,
-                    help_text="System CPU usage percentage"
-                ))
+            import psutil
             
-            # Memory usage
-            memory_usage = self._get_memory_usage()
-            if memory_usage is not None:
-                metrics.append(MetricValue(
-                    name="system_memory_usage_percent",
-                    value=memory_usage,
-                    labels={},
-                    timestamp=timestamp,
-                    help_text="System memory usage percentage"
-                ))
+            metrics = []
+            now = datetime.now()
             
-            # Disk usage
-            disk_usage = self._get_disk_usage()
-            if disk_usage is not None:
-                metrics.append(MetricValue(
-                    name="system_disk_usage_percent",
-                    value=disk_usage,
+            # CPU metrics
+            cpu_percent = psutil.cpu_percent(interval=1)
+            metrics.append(MetricValue(
+                name="system_cpu_usage_percent",
+                value=cpu_percent,
+                labels={},
+                timestamp=now
+            ))
+            
+            # Memory metrics
+            memory = psutil.virtual_memory()
+            metrics.append(MetricValue(
+                name="system_memory_usage_percent",
+                value=memory.percent,
+                labels={},
+                timestamp=now
+            ))
+            
+            # Disk metrics
+            disk = psutil.disk_usage('/')
+            metrics.append(MetricValue(
+                name="system_disk_usage_percent",
+                value=disk.percent,
+                labels={},
+                timestamp=now
+            ))
+            
+            # Network metrics
+            net_io = psutil.net_io_counters()
+            metrics.extend([
+                MetricValue(
+                    name="system_network_bytes_sent",
+                    value=net_io.bytes_sent,
                     labels={},
-                    timestamp=timestamp,
-                    help_text="System disk usage percentage"
-                ))
+                    timestamp=now
+                ),
+                MetricValue(
+                    name="system_network_bytes_recv",
+                    value=net_io.bytes_recv,
+                    labels={},
+                    timestamp=now
+                )
+            ])
             
             logger.info(f"Collected {len(metrics)} system metrics")
             return metrics
@@ -183,73 +195,48 @@ class MetricsCollector:
             logger.error(f"Failed to collect system metrics: {e}")
             return []
     
-    def _get_cpu_usage(self) -> Optional[float]:
-        """Get CPU usage percentage."""
+    def collect_trading_metrics(self) -> List[MetricValue]:
+        """Collect trading-specific metrics."""
         try:
-            result = subprocess.run(
-                ["top", "-bn1"], 
-                capture_output=True, 
-                text=True, 
-                timeout=5
-            )
+            # Get bot metrics first
+            bot_metrics = self.collect_bot_metrics()
             
-            for line in result.stdout.split('\n'):
-                if '%Cpu(s):' in line:
-                    # Extract idle percentage and calculate usage
-                    parts = line.split(',')
-                    for part in parts:
-                        if 'id' in part:
-                            idle = float(part.strip().split()[0])
-                            return 100 - idle
-            return None
+            # Filter for trading-related metrics
+            trading_metrics = [
+                m for m in bot_metrics
+                if any(prefix in m.name for prefix in [
+                    'orders_', 'trades_', 'pnl_', 'positions_',
+                    'ml_', 'vwap_', 'errors_'
+                ])
+            ]
+            
+            logger.info(f"Collected {len(trading_metrics)} trading metrics")
+            return trading_metrics
             
         except Exception as e:
-            logger.warning(f"CPU usage collection failed: {e}")
-            return None
+            logger.error(f"Failed to collect trading metrics: {e}")
+            return []
     
-    def _get_memory_usage(self) -> Optional[float]:
-        """Get memory usage percentage."""
+    def collect_ml_metrics(self) -> List[MetricValue]:
+        """Collect ML-specific metrics."""
         try:
-            result = subprocess.run(
-                ["free", "-m"], 
-                capture_output=True, 
-                text=True, 
-                timeout=5
-            )
+            # Get bot metrics first
+            bot_metrics = self.collect_bot_metrics()
             
-            lines = result.stdout.split('\n')
-            for line in lines:
-                if line.startswith('Mem:'):
-                    parts = line.split()
-                    total = int(parts[1])
-                    used = int(parts[2])
-                    return (used / total) * 100
-            return None
+            # Filter for ML-related metrics
+            ml_metrics = [
+                m for m in bot_metrics
+                if any(prefix in m.name for prefix in [
+                    'ml_', 'onnx_', 'model_'
+                ])
+            ]
+            
+            logger.info(f"Collected {len(ml_metrics)} ML metrics")
+            return ml_metrics
             
         except Exception as e:
-            logger.warning(f"Memory usage collection failed: {e}")
-            return None
-    
-    def _get_disk_usage(self) -> Optional[float]:
-        """Get disk usage percentage."""
-        try:
-            result = subprocess.run(
-                ["df", "-h", "/"], 
-                capture_output=True, 
-                text=True, 
-                timeout=5
-            )
-            
-            lines = result.stdout.split('\n')
-            if len(lines) >= 2:
-                parts = lines[1].split()
-                usage_str = parts[4].rstrip('%')
-                return float(usage_str)
-            return None
-            
-        except Exception as e:
-            logger.warning(f"Disk usage collection failed: {e}")
-            return None
+            logger.error(f"Failed to collect ML metrics: {e}")
+            return []
 
 class AlertManager:
     """Manages alerting rules and notifications."""
@@ -459,24 +446,29 @@ class AlertManager:
             logger.error(f"Failed to send alert notification: {e}")
     
     def _send_slack_notification(self, alert: Alert, webhook_url: str):
-        """Send Slack notification."""
+        """Send alert notification to Slack."""
         try:
-            emoji = "🔴" if alert.severity == "critical" else "⚠️"
-            color = "danger" if alert.severity == "critical" else "warning"
+            # Format message
+            color = {
+                'critical': '#FF0000',
+                'warning': '#FFA500',
+                'info': '#00FF00'
+            }.get(alert.severity, '#808080')
             
-            payload = {
-                "text": f"{emoji} Bitunix Bot Alert",
+            message = {
                 "attachments": [{
                     "color": color,
+                    "title": f"🚨 {alert.severity.upper()} Alert: {alert.rule_name}",
+                    "text": alert.description,
                     "fields": [
                         {
-                            "title": "Alert",
-                            "value": alert.description,
-                            "short": False
+                            "title": "Metric",
+                            "value": alert.metric_name,
+                            "short": True
                         },
                         {
-                            "title": "Metric",
-                            "value": f"{alert.metric_name}: {alert.current_value:.2f}",
+                            "title": "Current Value",
+                            "value": f"{alert.current_value:.2f}",
                             "short": True
                         },
                         {
@@ -485,85 +477,89 @@ class AlertManager:
                             "short": True
                         },
                         {
-                            "title": "Severity",
-                            "value": alert.severity.upper(),
-                            "short": True
-                        },
-                        {
                             "title": "Time",
-                            "value": alert.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                            "value": alert.timestamp.strftime('%Y-%m-%d %H:%M:%S'),
                             "short": True
                         }
                     ]
                 }]
             }
             
-            response = requests.post(webhook_url, json=payload, timeout=10)
+            # Send to Slack
+            response = requests.post(
+                webhook_url,
+                json=message,
+                timeout=10
+            )
             response.raise_for_status()
-            logger.info("Slack notification sent successfully")
+            logger.info(f"Sent Slack notification for alert: {alert.rule_name}")
             
         except Exception as e:
             logger.error(f"Failed to send Slack notification: {e}")
     
-    def _send_email_notification(self, alert: Alert, email_config: Dict):
-        """Send email notification."""
+    def _get_email_config(self) -> Optional[Dict[str, str]]:
+        """Get email configuration from environment variables."""
+        required_vars = [
+            'SMTP_SERVER',
+            'SMTP_PORT',
+            'SMTP_USERNAME',
+            'SMTP_PASSWORD',
+            'ALERT_EMAIL_FROM',
+            'ALERT_EMAIL_TO'
+        ]
+        
+        config = {}
+        for var in required_vars:
+            value = os.getenv(var)
+            if not value:
+                return None
+            config[var.lower()] = value
+        
+        return config
+    
+    def _send_email_notification(self, alert: Alert, config: Dict[str, str]):
+        """Send alert notification via email."""
         try:
             import smtplib
-            from email.mime.text import MimeText
-            from email.mime.multipart import MimeMultipart
+            from email.mime.text import MIMEText
+            from email.mime.multipart import MIMEMultipart
             
-            msg = MimeMultipart()
-            msg['From'] = email_config['from']
-            msg['To'] = email_config['to']
-            msg['Subject'] = f"Bitunix Bot Alert: {alert.description}"
+            # Create message
+            msg = MIMEMultipart()
+            msg['From'] = config['alert_email_from']
+            msg['To'] = config['alert_email_to']
+            msg['Subject'] = f"[{alert.severity.upper()}] Alert: {alert.rule_name}"
             
+            # Format body
             body = f"""
-Alert Details:
-- Rule: {alert.rule_name}
-- Description: {alert.description}
-- Metric: {alert.metric_name}
-- Current Value: {alert.current_value:.2f}
-- Threshold: {alert.threshold:.2f}
-- Severity: {alert.severity.upper()}
-- Timestamp: {alert.timestamp.strftime("%Y-%m-%d %H:%M:%S")}
-
-Please investigate this issue promptly.
+            Alert Details:
+            -------------
+            Rule: {alert.rule_name}
+            Severity: {alert.severity}
+            Description: {alert.description}
+            
+            Metric Information:
+            ------------------
+            Metric: {alert.metric_name}
+            Current Value: {alert.current_value:.2f}
+            Threshold: {alert.threshold:.2f}
+            Time: {alert.timestamp.strftime('%Y-%m-%d %H:%M:%S')}
+            
+            This is an automated alert from the Bitunix Trading Bot monitoring system.
             """
             
-            msg.attach(MimeText(body, 'plain'))
+            msg.attach(MIMEText(body, 'plain'))
             
-            server = smtplib.SMTP(email_config['smtp_host'], email_config['smtp_port'])
-            if email_config.get('use_tls', False):
+            # Send email
+            with smtplib.SMTP(config['smtp_server'], int(config['smtp_port'])) as server:
                 server.starttls()
-            if email_config.get('username') and email_config.get('password'):
-                server.login(email_config['username'], email_config['password'])
+                server.login(config['smtp_username'], config['smtp_password'])
+                server.send_message(msg)
             
-            server.send_message(msg)
-            server.quit()
-            
-            logger.info("Email notification sent successfully")
+            logger.info(f"Sent email notification for alert: {alert.rule_name}")
             
         except Exception as e:
             logger.error(f"Failed to send email notification: {e}")
-    
-    def _get_email_config(self) -> Optional[Dict]:
-        """Get email configuration from environment variables."""
-        config = {}
-        
-        config['from'] = os.getenv('ALERT_EMAIL_FROM')
-        config['to'] = os.getenv('ALERT_EMAIL_TO')
-        config['smtp_host'] = os.getenv('ALERT_SMTP_HOST')
-        config['smtp_port'] = int(os.getenv('ALERT_SMTP_PORT', '587'))
-        config['username'] = os.getenv('ALERT_SMTP_USERNAME')
-        config['password'] = os.getenv('ALERT_SMTP_PASSWORD')
-        config['use_tls'] = os.getenv('ALERT_SMTP_TLS', 'true').lower() == 'true'
-        
-        # Check if required fields are present
-        required_fields = ['from', 'to', 'smtp_host']
-        if all(config.get(field) for field in required_fields):
-            return config
-        
-        return None
 
 class MonitoringDashboard:
     """Generate monitoring dashboard and reports."""
@@ -604,41 +600,136 @@ class MonitoringDashboard:
         return report
     
     def _generate_summary(self, metrics: List[MetricValue]) -> Dict[str, Any]:
-        """Generate summary statistics."""
-        summary = {}
+        """Generate summary of system health."""
+        summary = {
+            'status': 'healthy',
+            'issues': [],
+            'warnings': [],
+            'metrics_summary': {}
+        }
         
-        # Key metrics summary
-        key_metrics = [
-            'trading_orders_total',
-            'trading_profits_total',
-            'ml_predictions_total',
-            'ml_accuracy',
-            'websocket_reconnections_total',
-            'system_cpu_usage_percent',
-            'system_memory_usage_percent'
-        ]
+        # Create metric lookup
+        metric_map = {m.name: m for m in metrics}
         
-        for metric_name in key_metrics:
-            metric = next((m for m in metrics if m.name == metric_name), None)
-            if metric:
-                summary[metric_name] = metric.value
+        # Check system health
+        cpu_usage = metric_map.get('system_cpu_usage_percent')
+        if cpu_usage and cpu_usage.value > 90:
+            summary['issues'].append(f"Critical CPU usage: {cpu_usage.value:.1f}%")
+            summary['status'] = 'unhealthy'
+        elif cpu_usage and cpu_usage.value > 80:
+            summary['warnings'].append(f"High CPU usage: {cpu_usage.value:.1f}%")
+        
+        memory_usage = metric_map.get('system_memory_usage_percent')
+        if memory_usage and memory_usage.value > 90:
+            summary['issues'].append(f"Critical memory usage: {memory_usage.value:.1f}%")
+            summary['status'] = 'unhealthy'
+        elif memory_usage and memory_usage.value > 80:
+            summary['warnings'].append(f"High memory usage: {memory_usage.value:.1f}%")
+        
+        # Check trading health
+        error_rate = metric_map.get('errors_total')
+        if error_rate and error_rate.value > 10:
+            summary['issues'].append(f"High error rate: {error_rate.value} errors")
+            summary['status'] = 'unhealthy'
+        
+        ml_accuracy = metric_map.get('ml_accuracy')
+        if ml_accuracy and ml_accuracy.value < 0.6:
+            summary['issues'].append(f"Low ML accuracy: {ml_accuracy.value:.2f}")
+            summary['status'] = 'unhealthy'
+        elif ml_accuracy and ml_accuracy.value < 0.7:
+            summary['warnings'].append(f"Degraded ML accuracy: {ml_accuracy.value:.2f}")
+        
+        # Generate metrics summary
+        for metric in metrics:
+            if metric.name not in summary['metrics_summary']:
+                summary['metrics_summary'][metric.name] = {
+                    'value': metric.value,
+                    'labels': metric.labels
+                }
         
         return summary
     
-    def save_report(self, report: Dict[str, Any], output_path: str = None):
+    def save_report(self, report: Dict[str, Any], output_path: str):
         """Save health report to file."""
         try:
-            if output_path is None:
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                output_path = f"health_report_{timestamp}.json"
+            # Create directory if it doesn't exist
+            output_dir = os.path.dirname(output_path)
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
             
+            # Save report
             with open(output_path, 'w') as f:
                 json.dump(report, f, indent=2, default=str)
             
-            logger.info(f"Health report saved to {output_path}")
+            logger.info(f"Saved health report to {output_path}")
             
         except Exception as e:
             logger.error(f"Failed to save health report: {e}")
+    
+    def generate_metrics_dashboard(self) -> Dict[str, Any]:
+        """Generate Grafana-compatible dashboard configuration."""
+        dashboard = {
+            "dashboard": {
+                "title": "Bitunix Bot - System Health",
+                "panels": [
+                    # System metrics
+                    {
+                        "title": "CPU Usage",
+                        "type": "gauge",
+                        "targets": [{
+                            "expr": "system_cpu_usage_percent"
+                        }]
+                    },
+                    {
+                        "title": "Memory Usage",
+                        "type": "gauge",
+                        "targets": [{
+                            "expr": "system_memory_usage_percent"
+                        }]
+                    },
+                    # Trading metrics
+                    {
+                        "title": "Active Positions",
+                        "type": "stat",
+                        "targets": [{
+                            "expr": "active_positions"
+                        }]
+                    },
+                    {
+                        "title": "Total P&L",
+                        "type": "stat",
+                        "targets": [{
+                            "expr": "pnl_total"
+                        }]
+                    },
+                    # ML metrics
+                    {
+                        "title": "ML Model Accuracy",
+                        "type": "gauge",
+                        "targets": [{
+                            "expr": "ml_accuracy"
+                        }]
+                    },
+                    {
+                        "title": "ML Prediction Latency",
+                        "type": "graph",
+                        "targets": [{
+                            "expr": "rate(ml_latency_seconds_sum[5m]) / rate(ml_latency_seconds_count[5m])"
+                        }]
+                    },
+                    # Error metrics
+                    {
+                        "title": "Error Rate",
+                        "type": "graph",
+                        "targets": [{
+                            "expr": "rate(errors_total[5m])"
+                        }]
+                    }
+                ]
+            }
+        }
+        
+        return dashboard
 
 def main():
     """Main monitoring function."""

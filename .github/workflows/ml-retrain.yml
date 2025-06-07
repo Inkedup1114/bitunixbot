@@ -2,242 +2,166 @@ name: ML Model Retraining
 
 on:
   schedule:
-    # Run daily at 2 AM UTC
-    - cron: '0 2 * * *'
+    - cron: '0 2 * * *'  # Daily at 2 AM UTC
   workflow_dispatch:
-    # Allow manual triggering
     inputs:
-      training_days:
+      days:
         description: 'Number of days of data to use for training'
-        required: false
+        required: true
         default: '30'
         type: string
       symbol:
-        description: 'Symbol to train on (leave empty for all symbols)'
-        required: false
-        default: ''
+        description: 'Trading symbol to train on'
+        required: true
+        default: 'BTCUSDT'
         type: string
-      deploy:
-        description: 'Deploy model after training'
+      sigma_threshold:
+        description: 'Sigma threshold for reversal detection'
         required: false
-        default: true
-        type: boolean
+        default: '1.5'
+        type: string
 
 env:
-  MODELS_DIR: ./models
-  DATA_DIR: ./data
-  LOGS_DIR: ./logs
+  PYTHON_VERSION: '3.12'
 
 jobs:
-  retrain-model:
+  retrain:
+    name: Retrain ML Model
     runs-on: ubuntu-latest
-    
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '1.21'
-        
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.9'
-        
-    - name: Create directories
-      run: |
-        mkdir -p ${{ env.MODELS_DIR }} ${{ env.DATA_DIR }} ${{ env.LOGS_DIR }}
-        
-    - name: Cache Go modules
-      uses: actions/cache@v3
-      with:
-        path: ~/go/pkg/mod
-        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go-
-          
-    - name: Cache Python dependencies
-      uses: actions/cache@v3
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
-          
-    - name: Install Python dependencies
-      run: |
-        cd scripts
-        pip install -r requirements.txt
-        
-    - name: Build Go modules
-      run: go mod tidy
-      
-    - name: Check for existing database
-      id: check_db
-      run: |
-        if [ -f "${{ env.DATA_DIR }}/features.db" ]; then
-          echo "database_exists=true" >> $GITHUB_OUTPUT
-          echo "Database found: $(ls -lh ${{ env.DATA_DIR }}/features.db)"
-        else
-          echo "database_exists=false" >> $GITHUB_OUTPUT
-          echo "No database found at ${{ env.DATA_DIR }}/features.db"
-        fi
-        
-    - name: Export training data
-      if: steps.check_db.outputs.database_exists == 'true'
-      run: |
-        DAYS="${{ github.event.inputs.training_days || '30' }}"
-        SYMBOL="${{ github.event.inputs.symbol || '' }}"
-        
-        export_cmd="go run scripts/export_data.go -db '${{ env.DATA_DIR }}/features.db' -output 'scripts/training_data.json' -days $DAYS"
-        if [ -n "$SYMBOL" ]; then
-          export_cmd="$export_cmd -symbol '$SYMBOL'"
-        fi
-        
-        echo "Running: $export_cmd"
-        eval "$export_cmd"
-        
-        # Check if data was exported successfully
-        if [ ! -f "scripts/training_data.json" ]; then
-          echo "❌ Data export failed - no training data file created"
-          exit 1
-        fi
-        
-        # Check data size
-        record_count=$(python3 -c "import json; print(len(json.load(open('scripts/training_data.json'))))")
-        echo "📊 Exported $record_count training records"
-        
-        if [ "$record_count" -lt 100 ]; then
-          echo "⚠️ Warning: Only $record_count records available (minimum 100 recommended)"
-        fi
-        
-    - name: Generate sample data (fallback)
-      if: steps.check_db.outputs.database_exists == 'false'
-      run: |
-        echo "🔄 No database found, will use sample data generation in training script"
-        
-    - name: Backup existing model
-      id: backup
-      run: |
-        if [ -f "${{ env.MODELS_DIR }}/model.onnx" ]; then
-          backup_name="model_backup_$(date +%Y%m%d_%H%M%S).onnx"
-          cp "${{ env.MODELS_DIR }}/model.onnx" "${{ env.MODELS_DIR }}/$backup_name"
-          echo "backup_created=true" >> $GITHUB_OUTPUT
-          echo "backup_name=$backup_name" >> $GITHUB_OUTPUT
-          echo "✅ Backed up existing model to $backup_name"
-        else
-          echo "backup_created=false" >> $GITHUB_OUTPUT
-          echo "ℹ️ No existing model to backup"
-        fi
-        
-    - name: Train ML model
-      run: |
-        cd scripts
-        python3 label_and_train.py 2>&1 | tee ../${{ env.LOGS_DIR }}/training.log
-        
-    - name: Validate ONNX model
-      run: |
-        if [ ! -f "${{ env.MODELS_DIR }}/model.onnx" ]; then
-          echo "❌ Model training failed - no ONNX file created"
-          exit 1
-        fi
-        
-        # Validate ONNX model
-        python3 -c "
-import onnx
-import onnxruntime as ort
-import sys
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-try:
-    model = onnx.load('${{ env.MODELS_DIR }}/model.onnx')
-    onnx.checker.check_model(model)
-    session = ort.InferenceSession('${{ env.MODELS_DIR }}/model.onnx')
-    
-    print('✅ ONNX model validation successful')
-    print(f'📥 Inputs: {[inp.name for inp in session.get_inputs()]}')
-    print(f'📤 Outputs: {[out.name for out in session.get_outputs()]}')
-    
-    # Check model size
-    import os
-    size_mb = os.path.getsize('${{ env.MODELS_DIR }}/model.onnx') / (1024*1024)
-    print(f'📦 Model size: {size_mb:.2f} MB')
-    
-except Exception as e:
-    print(f'❌ Model validation failed: {e}')
-    sys.exit(1)
-"
-        
-    - name: Display training metrics
-      run: |
-        if [ -f "${{ env.MODELS_DIR }}/training_metrics.json" ]; then
-          echo "📈 Training Metrics:"
-          python3 -c "
-import json
-try:
-    with open('${{ env.MODELS_DIR }}/training_metrics.json') as f:
-        metrics = json.load(f)
-    print(f\"  🎯 AUC Score: {metrics.get('auc_score', 'N/A'):.4f}\")
-    print(f\"  🎯 F1 Score: {metrics.get('f1_score', 'N/A'):.4f}\")
-    print(f\"  📊 Training samples: {metrics.get('n_samples', 'N/A')}\")
-    print(f\"  ⚖️ Positive ratio: {metrics.get('positive_ratio', 'N/A'):.3f}\")
-    print(f\"  🏆 Best params: {metrics.get('best_params', 'N/A')}\")
-except Exception as e:
-    print(f'Could not read metrics: {e}')
-"
-        else
-          echo "⚠️ No training metrics file found"
-        fi
-        
-    - name: Upload model artifacts
-      uses: actions/upload-artifact@v3
-      with:
-        name: ml-model-${{ github.run_number }}
-        path: |
-          ${{ env.MODELS_DIR }}/model.onnx
-          ${{ env.MODELS_DIR }}/training_metrics.json
-          ${{ env.LOGS_DIR }}/training.log
-        retention-days: 30
-        
-    - name: Upload backup model (if created)
-      if: steps.backup.outputs.backup_created == 'true'
-      uses: actions/upload-artifact@v3
-      with:
-        name: backup-model-${{ github.run_number }}
-        path: ${{ env.MODELS_DIR }}/${{ steps.backup.outputs.backup_name }}
-        retention-days: 7
-        
-    - name: Clean up temporary files
-      run: |
-        rm -f scripts/training_data.json
-        
-    - name: Deployment notification
-      run: |
-        echo "🚀 Model retraining completed successfully!"
-        echo "📁 Model location: ${{ env.MODELS_DIR }}/model.onnx"
-        
-        if [ "${{ github.event.inputs.deploy || 'true' }}" = "true" ]; then
-          echo "⚠️ Manual deployment required in production environment"
-          echo "💡 Run: ./scripts/deploy_model.sh --no-restart"
-        else
-          echo "ℹ️ Model ready but deployment skipped (as requested)"
-        fi
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
 
-  notify-completion:
-    needs: retrain-model
+      - name: Install Python dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Download latest data
+        if: ${{ github.event_name == 'schedule' }}
+        run: |
+          # For scheduled runs, we need to fetch data from production
+          # This would typically connect to a database or API to get the latest data
+          echo "Fetching latest production data..."
+          # Placeholder for actual data fetching logic
+          # Example: aws s3 cp s3://bitunix-data/latest/features.db ./data/features.db
+          
+          # For demo purposes, generate sample data
+          python scripts/generate_sample_data.py --days 30 --output scripts/training_data.json
+
+      - name: Export data for training
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          # For manual runs, use the specified parameters
+          echo "Exporting data for training..."
+          go run scripts/export_data.go -days ${{ github.event.inputs.days || '30' }} -symbol ${{ github.event.inputs.symbol || 'BTCUSDT' }} -output scripts/training_data.json
+
+      - name: Train ML model
+        run: |
+          python ml-retrain.yml \
+            --data-file scripts/training_data.json \
+            --output-dir models \
+            --symbol ${{ github.event.inputs.symbol || 'BTCUSDT' }} \
+            --sigma-threshold ${{ github.event.inputs.sigma_threshold || '1.5' }} \
+            --verbose
+
+      - name: Validate model
+        run: |
+          python scripts/model_validation.py \
+            --model models/model.onnx \
+            --test-data scripts/test_data.json
+
+      - name: Compare with previous model
+        run: |
+          if [ -f "models/model-previous.onnx" ]; then
+            echo "Comparing with previous model..."
+            python scripts/compare_models.py \
+              --new-model models/model.onnx \
+              --old-model models/model-previous.onnx \
+              --test-data scripts/test_data.json
+          else
+            echo "No previous model found for comparison"
+          fi
+
+      - name: Upload model artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ml-model-${{ github.run_id }}
+          path: |
+            models/model.onnx
+            models/model_feature_info.json
+            models/model_metrics.json
+          retention-days: 30
+
+      - name: Create model release
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ML Model ${{ github.event.inputs.symbol || 'BTCUSDT' }} - ${{ github.run_id }}
+          tag_name: model-${{ github.run_id }}
+          files: |
+            models/model.onnx
+            models/model_feature_info.json
+            models/model_metrics.json
+          body: |
+            ML Model for ${{ github.event.inputs.symbol || 'BTCUSDT' }}
+            
+            Training parameters:
+            - Days: ${{ github.event.inputs.days || '30' }}
+            - Sigma threshold: ${{ github.event.inputs.sigma_threshold || '1.5' }}
+            
+            See attached metrics file for performance details.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  deploy-model:
+    name: Deploy ML Model
+    needs: retrain
     runs-on: ubuntu-latest
-    if: always()
-    
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     steps:
-    - name: Notify success
-      if: needs.retrain-model.result == 'success'
-      run: |
-        echo "✅ ML model retraining completed successfully"
-        # Add notification logic here (Slack, email, etc.)
-        
-    - name: Notify failure
-      if: needs.retrain-model.result == 'failure'
-      run: |
-        echo "❌ ML model retraining failed"
-        # Add notification logic here (Slack, email, etc.)
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download model artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ml-model-${{ github.run_id }}
+          path: models
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'latest'
+
+      - name: Configure Kubernetes context
+        uses: azure/k8s-set-context@v3
+        with:
+          kubeconfig: ${{ secrets.KUBE_CONFIG_STAGING }}
+
+      - name: Create ConfigMap for model
+        run: |
+          kubectl create configmap ml-model \
+            --from-file=models/model.onnx \
+            --from-file=models/model_feature_info.json \
+            -n bitunix-bot-staging \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Restart pods to pick up new model
+        run: |
+          kubectl rollout restart deployment/bitunix-bot -n bitunix-bot-staging
+          kubectl rollout status deployment/bitunix-bot -n bitunix-bot-staging
+
+      - name: Verify model deployment
+        run: |
+          echo "Waiting for pods to stabilize..."
+          sleep 30
+          kubectl get pods -n bitunix-bot-staging
+          
+          # Check if model is loaded correctly by examining logs
+          POD=$(kubectl get pods -n bitunix-bot-staging -l app=bitunix-bot -o jsonpath="{.items[0].metadata.name}")
+          kubectl logs $POD -n bitunix-bot-staging | grep -i "model loaded"

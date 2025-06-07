@@ -1,250 +1,269 @@
-name: CI/CD Pipeline
+name: Bitunix Bot CI/CD Pipeline
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ main ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  GO_VERSION: '1.24'
+  PYTHON_VERSION: '3.12'
+  DOCKER_REGISTRY: ${{ secrets.DOCKER_REGISTRY }}
 
 jobs:
-  test:
+  build:
+    name: Build and Test
     runs-on: ubuntu-latest
-    
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.24'
-        cache: true
-    
-    - name: Run unit tests
-      run: |
-        go test -v -race -coverprofile=coverage.out ./...
-        go tool cover -html=coverage.out -o coverage.html
-    
-    - name: Upload coverage reports
-      uses: codecov/codecov-action@v4
-      with:
-        file: ./coverage.out
-        fail_ci_if_error: true
-    
-    - name: Run integration tests
-      run: |
-        go test -v -tags=integration ./...
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-  security-scan:
-    runs-on: ubuntu-latest
-    needs: test
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Run Trivy vulnerability scanner
-      uses: aquasecurity/trivy-action@master
-      with:
-        scan-type: 'fs'
-        scan-ref: '.'
-        format: 'sarif'
-        output: 'trivy-results.sarif'
-    
-    - name: Upload Trivy scan results to GitHub Security tab
-      uses: github/codeql-action/upload-sarif@v3
-      if: always()
-      with:
-        sarif_file: 'trivy-results.sarif'
-    
-    - name: Run gosec security scanner
-      uses: securecodewarrior/github-action-gosec@master
-      with:
-        args: '-fmt sarif -out gosec-results.sarif ./...'
-    
-    - name: Upload gosec scan results
-      uses: github/codeql-action/upload-sarif@v3
-      if: always()
-      with:
-        sarif_file: 'gosec-results.sarif'
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
 
-  build-and-scan:
-    runs-on: ubuntu-latest
-    needs: [test, security-scan]
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-    
-    - name: Build Docker image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: ./deploy/Dockerfile
-        push: false
-        tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-    
-    - name: Run Trivy container scan
-      uses: aquasecurity/trivy-action@master
-      with:
-        image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-        format: 'sarif'
-        output: 'trivy-container-results.sarif'
-    
-    - name: Upload container scan results
-      uses: github/codeql-action/upload-sarif@v3
-      if: always()
-      with:
-        sarif_file: 'trivy-container-results.sarif'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
 
-  deploy:
+      - name: Install Go dependencies
+        run: go mod download
+
+      - name: Install Python dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Run Go linter
+        uses: golangci/golangci-lint-action@v4
+        with:
+          version: latest
+
+      - name: Run Go tests
+        run: go test -v -race -coverprofile=coverage.out ./...
+
+      - name: Run ML tests
+        run: |
+          cd scripts
+          python -m pytest -xvs
+
+      - name: Build binary
+        run: go build -o bitrader ./cmd/bitrader
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bitrader-binary
+          path: bitrader
+          retention-days: 7
+
+  docker-build:
+    name: Build Docker Image
+    needs: build
     runs-on: ubuntu-latest
-    needs: [test, security-scan, build-and-scan]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Log in to Container Registry
-      uses: docker/login-action@v3
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-    
-    - name: Build and push Docker image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: ./deploy/Dockerfile
-        push: true
-        tags: |
-          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-    
-    - name: Sign container image
-      uses: sigstore/cosign-installer@v3
-    
-    - name: Sign the published Docker image
-      env:
-        COSIGN_EXPERIMENTAL: 1
-      run: |
-        echo "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}" | xargs -I {} cosign sign --yes {}@$(docker inspect --format='{{index .RepoDigests 0}}' {})
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKER_REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_REGISTRY }}/bitunix-bot
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=sha,format=short
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./deploy/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   ml-pipeline:
+    name: ML Model Training
     runs-on: ubuntu-latest
-    needs: test
-    if: github.ref == 'refs/heads/main'
-    
+    needs: build
+    if: github.event_name == 'workflow_dispatch'
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.12'
-        cache: 'pip'
-    
-    - name: Install ML dependencies
-      run: |
-        pip install -r scripts/requirements.txt
-    
-    - name: Validate ML pipeline
-      run: |
-        python scripts/label_and_train.py --validate-only --data-file scripts/training_data.json
-    
-    - name: Create test dataset for validation
-      run: |
-        python -c "
-        import json
-        import numpy as np
-        
-        # Generate synthetic test data
-        np.random.seed(42)
-        test_data = []
-        for i in range(1000):
-            features = np.random.randn(10).tolist()
-            label = int(np.random.choice([0, 1]))
-            test_data.append({'features': features, 'label': label})
-        
-        with open('test_data.json', 'w') as f:
-            json.dump(test_data, f)
-        "
-    
-    - name: Run model validation (if model exists)
-      run: |
-        if [ -f "model.onnx" ]; then
-          python scripts/model_validation.py \
-            --model model.onnx \
-            --test-data test_data.json \
-            --output validation_results.json \
-            --min-accuracy 0.50 \
-            --min-precision 0.45 \
-            --min-recall 0.45 \
-            --min-f1 0.45 \
-            --min-auc 0.50
-        else
-          echo "No model found, skipping validation"
-        fi
-    
-    - name: Upload ML artifacts
-      if: success()
-      uses: actions/upload-artifact@v4
-      with:
-        name: ml-models
-        path: |
-          *.onnx
-          *_metrics.json
-          validation_results.json
-          model_validation.log
-        retention-days: 30
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-  monitoring-validation:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Generate sample data
+        run: python scripts/generate_sample_data.py
+
+      - name: Train ML model
+        run: python ml-retrain.yml --data-file scripts/training_data.json --output-dir models
+
+      - name: Validate model
+        run: python scripts/model_validation.py --model models/model.onnx
+
+      - name: Upload model artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ml-model
+          path: |
+            models/model.onnx
+            models/model_feature_info.json
+            models/model_metrics.json
+          retention-days: 7
+
+  deploy-development:
+    name: Deploy to Development
+    needs: [docker-build, ml-pipeline]
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'development'
     runs-on: ubuntu-latest
-    needs: test
-    if: github.ref == 'refs/heads/main'
-    
+    environment: development
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.12'
-        cache: 'pip'
-    
-    - name: Install monitoring dependencies
-      run: |
-        pip install requests prometheus-client pandas numpy
-    
-    - name: Validate monitoring scripts
-      run: |
-        python scripts/enhanced_monitoring.py --help
-        python scripts/model_validation.py --help
-        python -c "import scripts.enhanced_monitoring; import scripts.model_validation; print('Monitoring scripts validated successfully')"
-    
-    - name: Run monitoring dry-run
-      run: |
-        # Create mock metrics endpoint response
-        mkdir -p mock_data
-        echo "# HELP test_metric Test metric
-        # TYPE test_metric counter
-        test_metric 42" > mock_data/metrics.txt
-        
-        # Test monitoring script with mock data
-        python -c "
-        from scripts.enhanced_monitoring import MetricsCollector, AlertManager, MonitoringDashboard
-        print('Monitoring components imported successfully')
-        print('Monitoring validation completed')
-        "
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: 'latest'
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'latest'
+
+      - name: Configure Kubernetes context
+        uses: azure/k8s-set-context@v3
+        with:
+          kubeconfig: ${{ secrets.KUBE_CONFIG_DEV }}
+
+      - name: Deploy to development
+        run: |
+          helm upgrade --install bitunix-bot ./deploy/helm/bitunix-bot \
+            --namespace bitunix-bot-development \
+            --create-namespace \
+            --values ./deploy/helm/values-development.yaml \
+            --set image.tag=${{ github.sha }} \
+            --set secrets.apiKey=${{ secrets.BITUNIX_API_KEY }} \
+            --set secrets.secretKey=${{ secrets.BITUNIX_SECRET_KEY }}
+
+      - name: Verify deployment
+        run: |
+          kubectl rollout status deployment/bitunix-bot -n bitunix-bot-development
+          kubectl get pods -n bitunix-bot-development
+
+  deploy-staging:
+    name: Deploy to Staging
+    needs: [docker-build, ml-pipeline]
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: 'latest'
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'latest'
+
+      - name: Configure Kubernetes context
+        uses: azure/k8s-set-context@v3
+        with:
+          kubeconfig: ${{ secrets.KUBE_CONFIG_STAGING }}
+
+      - name: Deploy to staging
+        run: |
+          helm upgrade --install bitunix-bot ./deploy/helm/bitunix-bot \
+            --namespace bitunix-bot-staging \
+            --create-namespace \
+            --values ./deploy/helm/values-staging.yaml \
+            --set image.tag=${{ github.sha }} \
+            --set secrets.apiKey=${{ secrets.BITUNIX_API_KEY }} \
+            --set secrets.secretKey=${{ secrets.BITUNIX_SECRET_KEY }}
+
+      - name: Verify deployment
+        run: |
+          kubectl rollout status deployment/bitunix-bot -n bitunix-bot-staging
+          kubectl get pods -n bitunix-bot-staging
+
+  deploy-production:
+    name: Deploy to Production
+    needs: [docker-build, ml-pipeline, deploy-staging]
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: 'latest'
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'latest'
+
+      - name: Configure Kubernetes context
+        uses: azure/k8s-set-context@v3
+        with:
+          kubeconfig: ${{ secrets.KUBE_CONFIG_PROD }}
+
+      - name: Deploy to production
+        run: |
+          helm upgrade --install bitunix-bot ./deploy/helm/bitunix-bot \
+            --namespace bitunix-bot-production \
+            --create-namespace \
+            --values ./deploy/helm/values-production.yaml \
+            --set image.tag=${{ github.sha }} \
+            --set secrets.apiKey=${{ secrets.BITUNIX_API_KEY }} \
+            --set secrets.secretKey=${{ secrets.BITUNIX_SECRET_KEY }}
+
+      - name: Verify deployment
+        run: |
+          kubectl rollout status deployment/bitunix-bot -n bitunix-bot-production
+          kubectl get pods -n bitunix-bot-production

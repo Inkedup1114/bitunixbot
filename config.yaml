@@ -22,9 +22,10 @@ trading:
     - "BTCUSDT"
     - "ETHUSDT"
   baseSizeRatio: 0.002
-  maxPositionSize: 0.01  # 1% max position per symbol
-  maxDailyLoss: 0.05     # 5% max daily loss
-  maxPriceDistance: 3.0  # 3 standard deviations max
+  maxPositionSize: 0.01      # 1% max position per symbol
+  maxPositionExposure: 0.1   # 10% max total exposure per symbol
+  maxDailyLoss: 0.05         # 5% max daily loss
+  maxPriceDistance: 3.0      # 3 standard deviations max
   dryRun: true  # Set to false ONLY for live trading
 
 # Symbol-specific configuration
@@ -32,9 +33,11 @@ symbolConfig:
   BTCUSDT:
     baseSizeRatio: 0.001
     maxPositionSize: 0.015
+    maxPositionExposure: 0.15  # 15% max exposure for BTC
   ETHUSDT:
     baseSizeRatio: 0.002
     maxPositionSize: 0.01
+    maxPositionExposure: 0.08  # 8% max exposure for ETH
 
 # Technical Analysis Configuration
 features:
@@ -49,7 +52,7 @@ ml:
 
 # System Configuration  
 system:
-  dataPath: "/tmp/bitunix-data"
+  dataPath: "C:\\DEV\\bitunixbot\\data"
   pingInterval: "15s"
   metricsPort: 8080
   restTimeout: "5s"

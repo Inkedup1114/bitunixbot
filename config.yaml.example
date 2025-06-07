@@ -53,3 +53,16 @@ system:
   pingInterval: "15s"
   metricsPort: 8080
   restTimeout: "5s"
+  
+  # Order execution timeout settings
+  orderExecutionTimeout: "30s"       # Maximum time to wait for order completion
+  orderStatusCheckInterval: "5s"     # How often to check pending order status
+  maxOrderRetries: 3                 # Maximum number of retry attempts
+
+# Circuit breaker configuration
+circuitBreaker:
+  volatility: 2.0      # Volatility threshold in standard deviations
+  imbalance: 0.8       # Order book imbalance threshold (0.8 = 80%)
+  volume: 5.0          # Volume threshold multiplier (5x normal)
+  errorRate: 0.2       # Error rate threshold (20%)
+  recoveryTime: "5m"   # Recovery time after circuit breaker activation

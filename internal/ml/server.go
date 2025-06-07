@@ -10,6 +10,18 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// PredictionRequest represents a prediction request payload
+type PredictionRequest struct {
+	Features []float32 `json:"features"`
+}
+
+// PredictionResponse represents a prediction response payload
+type PredictionResponse struct {
+	Probabilities []float64 `json:"probabilities,omitempty"`
+	Prediction    int       `json:"prediction,omitempty"`
+	Error         string    `json:"error,omitempty"`
+}
+
 // ModelServer provides HTTP API for model predictions
 type ModelServer struct {
 	predictor *ProductionPredictor
@@ -48,8 +60,12 @@ func (ms *ModelServer) Start() error {
 	mux.HandleFunc("/health", ms.handleHealth)
 
 	ms.server = &http.Server{
-		Addr:    fmt.Sprintf(":%d", ms.port),
-		Handler: mux,
+		Addr:              fmt.Sprintf(":%d", ms.port),
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	return ms.server.ListenAndServe()
@@ -78,8 +94,8 @@ func (ms *ModelServer) handlePredict(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Perform prediction
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	// Perform prediction with configurable timeout
+	ctx, cancel := context.WithTimeout(r.Context(), ms.predictor.config.PredictionTimeout)
 	defer cancel()
 
 	score, err := ms.predictor.PredictWithContext(ctx, req.Features)

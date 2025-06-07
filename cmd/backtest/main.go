@@ -1,19 +1,32 @@
 package main
 
 import (
-	"bitunix-bot/internal/backtest"
-	"bitunix-bot/internal/cfg"
-	"bitunix-bot/internal/ml"
-	"bitunix-bot/internal/storage"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
+	"bitunix-bot/internal/backtest"
+	"bitunix-bot/internal/cfg"
+	"bitunix-bot/internal/ml"
+	"bitunix-bot/internal/storage"
+
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
+
+// MockMetrics implements ml.MetricsInterface for backtest
+type MockMetrics struct{}
+
+func (m *MockMetrics) MLPredictionsInc()                   {}
+func (m *MockMetrics) MLFailuresInc()                      {}
+func (m *MockMetrics) MLLatencyObserve(v float64)          {}
+func (m *MockMetrics) MLModelAgeSet(v float64)             {}
+func (m *MockMetrics) MLAccuracyObserve(v float64)         {}
+func (m *MockMetrics) MLPredictionScoresObserve(v float64) {}
+func (m *MockMetrics) MLTimeoutsInc()                      {}
+func (m *MockMetrics) MLFallbackUseInc()                   {}
 
 func main() {
 	// Parse command line arguments
@@ -118,7 +131,9 @@ func main() {
 	}
 
 	// Create ML predictor
-	predictor, err := ml.New(config.ModelPath)
+	// For backtest, we don't need real metrics, so use a simple mock
+	mockMetrics := &MockMetrics{}
+	predictor, err := ml.NewWithMetrics(config.ModelPath, mockMetrics, 5*time.Second)
 	if err != nil {
 		log.Warn().Err(err).Msg("Failed to load ML model, using fallback")
 	}

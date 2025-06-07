@@ -1,7 +1,7 @@
 #include "textflag.h"
 
 // func simdVWAPCalc(samples []sample, size int) (sum, sumSq, volSum float64)
-TEXT ·simdVWAPCalc(SB), NOSPLIT, $0-64
+TEXT ·simdVWAPCalc(SB), NOSPLIT, $0-56
     MOVQ samples_base+0(FP), SI    // SI = &samples[0]
     MOVQ samples_len+8(FP), CX     // CX = len(samples)
     MOVQ size+24(FP), DX           // DX = size
@@ -66,4 +66,4 @@ done:
     MOVSD X0, sum+32(FP)
     MOVSD X1, sumSq+40(FP)
     MOVSD X2, volSum+48(FP)
-    RET 
+    RET

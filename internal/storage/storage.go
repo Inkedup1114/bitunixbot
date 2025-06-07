@@ -1,31 +1,42 @@
+// Package storage provides persistent data storage for the Bitunix trading bot.
+// It uses BoltDB as the underlying storage engine to store trading data including
+// trades, market depth, and feature records for machine learning.
+//
+// The package provides thread-safe operations for storing and retrieving
+// time-series data with efficient range queries and automatic bucket management.
 package storage
 
 import (
-	"bitunix-bot/internal/exchange/bitunix"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"time"
 
+	"bitunix-bot/internal/exchange/bitunix"
+
 	"go.etcd.io/bbolt"
 )
 
 const (
-	tradesBucket = "trades"
-	depthsBucket = "depths"
+	tradesBucket = "trades" // Bucket name for storing trade records
+	depthsBucket = "depths" // Bucket name for storing market depth records
 )
 
-// Store provides persistent storage for trading data using BoltDB
+// Store provides persistent storage for trading data using BoltDB.
+// It manages multiple buckets for different data types and provides
+// efficient time-range queries for historical data analysis.
 type Store struct {
-	db *bbolt.DB
+	db *bbolt.DB // BoltDB database instance
 }
 
-// New creates a new storage instance
+// New creates a new storage instance with the specified data path.
+// It initializes the BoltDB database and creates necessary buckets.
+// Returns an error if the database cannot be opened or buckets cannot be created.
 func New(dataPath string) (*Store, error) {
 	dbPath := filepath.Join(dataPath, "bitunix-data.db")
 
-	db, err := bbolt.Open(dbPath, 0600, &bbolt.Options{Timeout: 1 * time.Second})
+	db, err := bbolt.Open(dbPath, 0o600, &bbolt.Options{Timeout: 1 * time.Second})
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -48,7 +59,9 @@ func New(dataPath string) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
-// Close closes the database connection
+// Close closes the database connection gracefully.
+// It should be called when the storage is no longer needed to ensure
+// proper cleanup of database resources.
 func (s *Store) Close() error {
 	if s.db != nil {
 		return s.db.Close()
@@ -56,7 +69,9 @@ func (s *Store) Close() error {
 	return nil
 }
 
-// StoreTrade stores a trade record
+// StoreTrade stores a trade record in the trades bucket.
+// The trade is stored with a key format of "symbol_timestamp" for efficient
+// time-range queries. Returns an error if the trade cannot be serialized or stored.
 func (s *Store) StoreTrade(trade bitunix.Trade) error {
 	return s.db.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(tradesBucket))
@@ -71,7 +86,9 @@ func (s *Store) StoreTrade(trade bitunix.Trade) error {
 	})
 }
 
-// StoreDepth stores a depth record
+// StoreDepth stores a market depth record in the depths bucket.
+// The depth record is stored with a key format of "symbol_timestamp" for efficient
+// time-range queries. Returns an error if the depth cannot be serialized or stored.
 func (s *Store) StoreDepth(depth bitunix.Depth) error {
 	return s.db.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(depthsBucket))
@@ -86,12 +103,14 @@ func (s *Store) StoreDepth(depth bitunix.Depth) error {
 	})
 }
 
-// GetTrades retrieves trades for a symbol within a time range
-func (s *Store) GetTrades(symbol string, start, end time.Time) ([]bitunix.Trade, error) {
-	var trades []bitunix.Trade
+// getRecordsInRange is a generic function to retrieve records from a bucket within a time range.
+// It uses BoltDB cursors for efficient range scanning and applies the provided unmarshal function
+// to deserialize each record. Returns a slice of records or an error if the query fails.
+func (s *Store) getRecordsInRange(bucketName, symbol string, start, end time.Time, unmarshalFunc func([]byte) (interface{}, error)) ([]interface{}, error) {
+	var records []interface{}
 
 	err := s.db.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(tradesBucket))
+		b := tx.Bucket([]byte(bucketName))
 		c := b.Cursor()
 
 		prefix := []byte(symbol + "_")
@@ -103,47 +122,57 @@ func (s *Store) GetTrades(symbol string, start, end time.Time) ([]bitunix.Trade,
 				continue
 			}
 
-			var trade bitunix.Trade
-			if err := json.Unmarshal(v, &trade); err != nil {
+			record, err := unmarshalFunc(v)
+			if err != nil {
 				continue // Skip malformed records
 			}
-			trades = append(trades, trade)
+			records = append(records, record)
 		}
 
 		return nil
 	})
 
-	return trades, err
+	return records, err
 }
 
-// GetDepths retrieves depth records for a symbol within a time range
-func (s *Store) GetDepths(symbol string, start, end time.Time) ([]bitunix.Depth, error) {
-	var depths []bitunix.Depth
-
-	err := s.db.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(depthsBucket))
-		c := b.Cursor()
-
-		prefix := []byte(symbol + "_")
-		startKey := []byte(fmt.Sprintf("%s_%d", symbol, start.UnixNano()))
-		endKey := []byte(fmt.Sprintf("%s_%d", symbol, end.UnixNano()))
-
-		for k, v := c.Seek(startKey); k != nil && compareKeys(k, endKey) <= 0; k, v = c.Next() {
-			if !hasPrefix(k, prefix) {
-				continue
-			}
-
-			var depth bitunix.Depth
-			if err := json.Unmarshal(v, &depth); err != nil {
-				continue // Skip malformed records
-			}
-			depths = append(depths, depth)
-		}
-
-		return nil
+// GetTrades retrieves trade records for a specific symbol within a time range.
+// Returns a slice of Trade structs ordered by timestamp, or an error if the query fails.
+// The time range is inclusive of both start and end times.
+func (s *Store) GetTrades(symbol string, start, end time.Time) ([]bitunix.Trade, error) {
+	records, err := s.getRecordsInRange(tradesBucket, symbol, start, end, func(data []byte) (interface{}, error) {
+		var trade bitunix.Trade
+		err := json.Unmarshal(data, &trade)
+		return trade, err
 	})
+	if err != nil {
+		return nil, err
+	}
 
-	return depths, err
+	trades := make([]bitunix.Trade, len(records))
+	for i, record := range records {
+		trades[i] = record.(bitunix.Trade)
+	}
+	return trades, nil
+}
+
+// GetDepths retrieves market depth records for a specific symbol within a time range.
+// Returns a slice of Depth structs ordered by timestamp, or an error if the query fails.
+// The time range is inclusive of both start and end times.
+func (s *Store) GetDepths(symbol string, start, end time.Time) ([]bitunix.Depth, error) {
+	records, err := s.getRecordsInRange(depthsBucket, symbol, start, end, func(data []byte) (interface{}, error) {
+		var depth bitunix.Depth
+		err := json.Unmarshal(data, &depth)
+		return depth, err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	depths := make([]bitunix.Depth, len(records))
+	for i, record := range records {
+		depths[i] = record.(bitunix.Depth)
+	}
+	return depths, nil
 }
 
 func hasPrefix(data, prefix []byte) bool {

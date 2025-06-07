@@ -283,7 +283,8 @@ func TestParseTrade_Valid(t *testing.T) {
 	}
 
 	trades := make(chan Trade, 1)
-	err := parseTrade(tradeData, trades, 0)
+	ws := NewWS("test")
+	err := ws.parseTrade(tradeData, trades, 0)
 	if err != nil {
 		t.Errorf("Expected no error, got %v", err)
 	}
@@ -355,7 +356,8 @@ func TestParseTrade_Invalid(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			trades := make(chan Trade, 1)
-			err := parseTrade(tt.data, trades, 0)
+			ws := NewWS("test")
+			err := ws.parseTrade(tt.data, trades, 0)
 
 			if err == nil {
 				t.Error("Expected error but got none")
@@ -379,7 +381,8 @@ func TestParseDepth_Valid(t *testing.T) {
 	}
 
 	depths := make(chan Depth, 1)
-	err := parseDepth(depthData, depths, 0)
+	ws := NewWS("test")
+	err := ws.parseDepth(depthData, depths, 0)
 	if err != nil {
 		t.Errorf("Expected no error, got %v", err)
 	}
@@ -454,7 +457,8 @@ func TestParseDepth_Invalid(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			depths := make(chan Depth, 1)
-			err := parseDepth(tt.data, depths, 0)
+			ws := NewWS("test")
+			err := ws.parseDepth(tt.data, depths, 0)
 
 			if err == nil {
 				t.Error("Expected error but got none")
@@ -514,7 +518,8 @@ func BenchmarkParseTrade(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		parseTrade(tradeData, trades, 0)
+		ws := NewWS("test")
+		ws.parseTrade(tradeData, trades, 0)
 		// Drain channel to prevent blocking
 		select {
 		case <-trades:
@@ -543,7 +548,8 @@ func BenchmarkParseDepth(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		parseDepth(depthData, depths, 0)
+		ws := NewWS("test")
+		ws.parseDepth(depthData, depths, 0)
 		// Drain channel to prevent blocking
 		select {
 		case <-depths:

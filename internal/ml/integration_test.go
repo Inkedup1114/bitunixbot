@@ -19,7 +19,7 @@ func TestPredictor_IntegrationWithSampleModel(t *testing.T) {
 
 	// Create a minimal mock ONNX model file (just for file existence)
 	mockModelContent := []byte("mock onnx model content")
-	err := os.WriteFile(modelPath, mockModelContent, 0644)
+	err := os.WriteFile(modelPath, mockModelContent, 0o644)
 	if err != nil {
 		t.Fatalf("Failed to create mock model file: %v", err)
 	}
@@ -89,7 +89,9 @@ func TestPredictor_ErrorHandling(t *testing.T) {
 	// Test with very short timeout
 	tempDir := t.TempDir()
 	modelPath := filepath.Join(tempDir, "test_model.onnx")
-	os.WriteFile(modelPath, []byte("mock"), 0644)
+	if err := os.WriteFile(modelPath, []byte("mock"), 0o644); err != nil {
+		t.Fatalf("Failed to write mock model file: %v", err)
+	}
 
 	shortTimeoutPredictor, _ := NewWithMetrics(modelPath, metrics, 1*time.Millisecond)
 
@@ -102,7 +104,9 @@ func TestPredictor_HealthCheck(t *testing.T) {
 	metrics := &MockMetrics{}
 	tempDir := t.TempDir()
 	modelPath := filepath.Join(tempDir, "test_model.onnx")
-	os.WriteFile(modelPath, []byte("mock"), 0644)
+	if err := os.WriteFile(modelPath, []byte("mock"), 0o644); err != nil {
+		t.Fatalf("Failed to write mock model file: %v", err)
+	}
 
 	predictor, _ := NewWithMetrics(modelPath, metrics, 5*time.Second)
 
@@ -220,6 +224,6 @@ func BenchmarkPredictor_Predict(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		predictor.Predict(features)
+		_, _ = predictor.Predict(features)
 	}
 }

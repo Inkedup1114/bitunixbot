@@ -1,3 +1,9 @@
+// Package features provides technical indicator calculations for trading analysis.
+// It includes Volume Weighted Average Price (VWAP) calculations, order book
+// imbalance metrics, and other market microstructure features used for
+// algorithmic trading decisions.
+//
+// All calculations are thread-safe and optimized for high-frequency data processing.
 package features
 
 import (
@@ -9,29 +15,37 @@ import (
 	"bitunix-bot/internal/metrics"
 )
 
+// sample represents a single price-volume observation with timestamp.
 type sample struct {
-	p, v float64
-	t    time.Time
+	p, v float64   // price and volume
+	t    time.Time // timestamp
 }
 
 // VWAP calculates Volume Weighted Average Price over a sliding time window.
-// All methods are thread-safe and can be called concurrently.
+// It maintains a ring buffer of price-volume samples and provides thread-safe
+// calculations of VWAP and standard deviation. All methods are thread-safe
+// and can be called concurrently.
 type VWAP struct {
-	win         time.Duration
-	ring        *ring.Ring
-	mu          sync.RWMutex
-	maxSize     int
-	currentSize int
-	samplePool  *sync.Pool // Added for sample object pooling
+	win         time.Duration // Time window for VWAP calculation
+	ring        *ring.Ring    // Ring buffer for storing samples
+	mu          sync.RWMutex  // Mutex for thread-safe access
+	maxSize     int           // Maximum number of samples in the ring
+	currentSize int           // Current number of samples in the ring
+	samplePool  *sync.Pool    // Object pool for sample reuse to reduce allocations
 }
 
-// MetricsTracker interface for error tracking and performance monitoring
+// MetricsTracker interface for error tracking and performance monitoring.
+// Implementations should provide methods to track feature calculation errors,
+// duration metrics, and sample count statistics.
 type MetricsTracker interface {
-	FeatureErrorsInc()
-	FeatureCalcDuration(duration time.Duration) // Added for performance monitoring
-	FeatureSampleCount(count int)               // Added for performance monitoring
+	FeatureErrorsInc()                          // Increment error counter
+	FeatureCalcDuration(duration time.Duration) // Record calculation duration
+	FeatureSampleCount(count int)               // Record number of samples processed
 }
 
+// NewVWAP creates a new VWAP calculator with the specified time window and sample size.
+// The time window determines how far back in time to include samples, while size
+// limits the maximum number of samples stored. Returns a thread-safe VWAP instance.
 func NewVWAP(win time.Duration, size int) *VWAP {
 	if size <= 0 {
 		size = 1
@@ -55,10 +69,15 @@ func NewVWAP(win time.Duration, size int) *VWAP {
 	}
 }
 
+// Add adds a new price-volume sample to the VWAP calculation.
+// This is a convenience method that calls AddWithMetrics with nil metrics.
 func (v *VWAP) Add(price, volume float64) {
 	v.AddWithMetrics(price, volume, nil)
 }
 
+// AddWithMetrics adds a new price-volume sample to the VWAP calculation with metrics tracking.
+// It validates the input values and updates the ring buffer. Invalid values (NaN, infinity,
+// negative) are rejected and tracked as errors if metrics are provided.
 func (v *VWAP) AddWithMetrics(price, volume float64, metrics MetricsTracker) {
 	// Fast path: validate inputs before acquiring lock
 	if math.IsNaN(price) || math.IsInf(price, 0) || price < 0 {
@@ -100,10 +119,16 @@ func (v *VWAP) AddWithMetrics(price, volume float64, metrics MetricsTracker) {
 	}
 }
 
+// Calc calculates the current VWAP and standard deviation.
+// This is a convenience method that calls CalcWithMetrics with nil metrics.
+// Returns the VWAP value and standard deviation.
 func (v *VWAP) Calc() (value, std float64) {
 	return v.CalcWithMetrics(nil)
 }
 
+// CalcWithMetrics calculates the current VWAP and standard deviation with metrics tracking.
+// It processes all samples within the time window, calculates volume-weighted statistics,
+// and tracks performance metrics if provided. Returns VWAP value and standard deviation.
 func (v *VWAP) CalcWithMetrics(metrics MetricsTracker) (value, std float64) {
 	startTime := time.Now() // For calc duration metric
 
@@ -119,46 +144,8 @@ func (v *VWAP) CalcWithMetrics(metrics MetricsTracker) (value, std float64) {
 		return 0, 0
 	}
 
-	var pv, vv float64 // price*volume sum, volume sum
-	var count int
-	cutoff := time.Now().Add(-v.win)
-
-	// Pre-allocate validSamples slice to avoid allocations in hot path
-	// Maximum size is currentSize, but typically it will be smaller
-	validSamples := make([]sample, 0, v.currentSize)
-
-	v.ring.Do(func(x any) {
-		if x == nil {
-			return
-		}
-
-		sPtr, ok := x.(*sample)
-		if !ok || sPtr == nil { // Check if it's a pointer and not nil
-			return
-		}
-		s := *sPtr // Dereference to get the sample value
-
-		if s.t.After(cutoff) {
-			// Basic sanity checks for invalid data
-			if math.IsNaN(s.p) || math.IsInf(s.p, 0) || s.p < 0 {
-				if metrics != nil {
-					metrics.FeatureErrorsInc()
-				}
-				return
-			}
-			if math.IsNaN(s.v) || math.IsInf(s.v, 0) || s.v < 0 {
-				if metrics != nil {
-					metrics.FeatureErrorsInc()
-				}
-				return
-			}
-
-			pv += s.p * s.v
-			vv += s.v
-			validSamples = append(validSamples, s) // Collect valid samples
-			count++
-		}
-	})
+	// Collect valid samples within time window
+	validSamples, pv, vv, count := v.collectValidSamples(metrics)
 
 	if metrics != nil {
 		metrics.FeatureSampleCount(count)
@@ -183,32 +170,94 @@ func (v *VWAP) CalcWithMetrics(metrics MetricsTracker) (value, std float64) {
 	}
 
 	// Calculate volume-weighted standard deviation
+	std = v.calculateWeightedStd(validSamples, value, vv, metrics)
+
+	// Final validation
+	value, std = v.validateOutputs(value, std, metrics)
+
+	if metrics != nil {
+		metrics.FeatureCalcDuration(time.Since(startTime))
+	}
+
+	return value, std
+}
+
+// collectValidSamples collects samples within the time window and calculates basic statistics
+func (v *VWAP) collectValidSamples(metrics MetricsTracker) ([]sample, float64, float64, int) {
+	var pv, vv float64 // price*volume sum, volume sum
+	var count int
+	cutoff := time.Now().Add(-v.win)
+
+	// Pre-allocate validSamples slice to avoid allocations in hot path
+	validSamples := make([]sample, 0, v.currentSize)
+
+	v.ring.Do(func(x any) {
+		if x == nil {
+			return
+		}
+
+		sPtr, ok := x.(*sample)
+		if !ok || sPtr == nil {
+			return
+		}
+		s := *sPtr // Dereference to get the sample value
+
+		if s.t.After(cutoff) {
+			// Basic sanity checks for invalid data
+			if v.isValidSample(s, metrics) {
+				pv += s.p * s.v
+				vv += s.v
+				validSamples = append(validSamples, s)
+				count++
+			}
+		}
+	})
+
+	return validSamples, pv, vv, count
+}
+
+// isValidSample validates a single sample for NaN, infinity, and negative values
+func (v *VWAP) isValidSample(s sample, metrics MetricsTracker) bool {
+	if math.IsNaN(s.p) || math.IsInf(s.p, 0) || s.p < 0 {
+		if metrics != nil {
+			metrics.FeatureErrorsInc()
+		}
+		return false
+	}
+	if math.IsNaN(s.v) || math.IsInf(s.v, 0) || s.v < 0 {
+		if metrics != nil {
+			metrics.FeatureErrorsInc()
+		}
+		return false
+	}
+	return true
+}
+
+// calculateWeightedStd calculates the volume-weighted standard deviation
+func (v *VWAP) calculateWeightedStd(validSamples []sample, value, vv float64, metrics MetricsTracker) float64 {
 	var weightedVariance float64
 	for _, s := range validSamples {
 		deviation := s.p - value
 		weightedVariance += s.v * deviation * deviation
 	}
 
-	// Denominator for weighted variance should be sum of weights (volumes)
-	// However, standard formula for weighted sample variance can be complex.
-	// A common approach for weighted variance: sum(w_i * (x_i - mu_w)^2) / sum(w_i)
-	// Or, if considering Bessel's correction: sum(w_i * (x_i - mu_w)^2) / ( (M-1)/M * sum(w_i) ) where M is number of non-zero weights.
-	// For simplicity, using sum(w_i * (x_i - mu_w)^2) / sum(w_i)
-	if vv > 0 { // vv is sum of volumes (weights)
+	if vv > 0 {
 		variance := weightedVariance / vv
 		// Guard against negative variance (numerical precision issues)
 		if variance > 0 {
-			std = math.Sqrt(variance)
+			return math.Sqrt(variance)
 		} else {
 			if variance < 0 && metrics != nil {
 				metrics.FeatureErrorsInc() // Log if variance is negative
 			}
-			std = 0
+			return 0
 		}
-	} else {
-		std = 0 // Should not happen if vv > 0 check passed earlier, but as a safeguard
 	}
+	return 0
+}
 
+// validateOutputs performs final validation on the calculated value and standard deviation
+func (v *VWAP) validateOutputs(value, std float64, metrics MetricsTracker) (float64, float64) {
 	// Final sanity checks on output
 	if math.IsNaN(value) || math.IsInf(value, 0) {
 		if metrics != nil {
@@ -223,11 +272,7 @@ func (v *VWAP) CalcWithMetrics(metrics MetricsTracker) (value, std float64) {
 		std = 0
 	}
 
-	if metrics != nil {
-		metrics.FeatureCalcDuration(time.Since(startTime))
-	}
-
-	return
+	return value, std
 }
 
 // GetCurrentSize returns the current number of samples in the VWAP calculation window.
@@ -257,13 +302,12 @@ func (v *VWAP) Reset() {
 		}
 		current = current.Next()
 	}
-	// Reset ring pointer to the beginning (optional, but good practice)
-	// v.ring = v.ring.Move(-v.ring.Len() +1) // This might be tricky if ring is not fully populated.
-	// Simpler: just reset currentSize. The existing logic in AddWithMetrics
-	// will overwrite old values or nil values correctly.
+
+	// Reset currentSize without recreating the ring
 	v.currentSize = 0
-	// To be absolutely sure the ring is clean for Do iteration:
-	v.ring = ring.New(v.maxSize) // Re-initialize the ring
+
+	// No need to recreate the ring - just reuse the existing one
+	// The existing logic in AddWithMetrics will properly handle nil values
 }
 
 // FastVWAP implements a high-performance VWAP calculator

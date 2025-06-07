@@ -16,7 +16,8 @@ func TestParseTradeWithActualFormat(t *testing.T) {
 	}
 
 	trades := make(chan Trade, 1)
-	if err := parseTrade(raw, trades, 0); err != nil {
+	ws := NewWS("test")
+	if err := ws.parseTrade(raw, trades, 0); err != nil {
 		t.Fatalf("parseTrade failed: %v", err)
 	}
 
@@ -50,7 +51,8 @@ func TestParseDepthWithActualFormat(t *testing.T) {
 	}
 
 	depths := make(chan Depth, 1)
-	if err := parseDepth(raw, depths, 0); err != nil {
+	ws := NewWS("test")
+	if err := ws.parseDepth(raw, depths, 0); err != nil {
 		t.Fatalf("parseDepth failed: %v", err)
 	}
 
